@@ -53,19 +53,23 @@ import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.min
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
     private var _binding: ActivityMainBinding? = null
     private val binding get() = _binding!!
-    
+
     private var serverIp = ""
     private var isLocked = false
     private var isMatching = false
     private var lastScanTime = 0L
-    
+    private var scanStartTime = 0L
+    private var lastBlurStatus = false
+    private var lastGlareStatus = false
+
     private val matchCounts = mutableMapOf<String, Int>()
-    
+
     private val blacklist = mutableSetOf<String>()
     private val confirmedMedicines = mutableListOf<Medicine>()
     private val learningMemory = mutableMapOf<String, String>()
@@ -75,7 +79,7 @@ class MainActivity : AppCompatActivity() {
     private var currentPillCount: Int? = null
     private var currentVisiblePackQuantity: Int? = null
     private var latestScanText: String? = null
-    
+
     private lateinit var cameraExecutor: ExecutorService
     private val matchingScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var beep: ToneGenerator? = null
@@ -93,7 +97,30 @@ class MainActivity : AppCompatActivity() {
 
     private val TAG = "TOM_DEBUG"
     private val sampleFileName = "sample.txt"
-    private val junkPatterns = listOf("/", "\\", ">", "<", "Studio", "projects", "artifacts", "tbf42ccf", "Option", "Command", "Shift", "Caps", "Control", "Android", "Phase", "Model", "Repo", "Standard", "Implementation", "OCR", "Ready", "Voice")
+    private val junkPatterns = listOf(
+        "/",
+        "\\",
+        ">",
+        "<",
+        "Studio",
+        "projects",
+        "artifacts",
+        "tbf42ccf",
+        "Option",
+        "Command",
+        "Shift",
+        "Caps",
+        "Control",
+        "Android",
+        "Phase",
+        "Model",
+        "Repo",
+        "Standard",
+        "Implementation",
+        "OCR",
+        "Ready",
+        "Voice"
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -102,20 +129,20 @@ class MainActivity : AppCompatActivity() {
             WindowCompat.setDecorFitsSystemWindows(window, false)
             _binding = ActivityMainBinding.inflate(layoutInflater)
             setContentView(binding.root)
-            
+
             ViewCompat.setOnApplyWindowInsetsListener(binding.rootView) { view, insets ->
                 val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
                 view.setPadding(0, systemBars.top, 0, 0)
                 insets
             }
-            
+
             setupUI()
             setupData()
             binding.previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             requestRequiredPermissions()
             startAutoReconnect()
             startScanAnimation()
-        } catch (e: Exception) { 
+        } catch (e: Exception) {
             Log.e(TAG, "Critical Crash in onCreate", e)
             finish()
         }
@@ -123,7 +150,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestRequiredPermissions() {
         val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-        val missing = perms.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        val missing = perms.filter {
+            ContextCompat.checkSelfPermission(
+                this,
+                it
+            ) != PackageManager.PERMISSION_GRANTED
+        }
         if (missing.isNotEmpty()) {
             Log.d(TAG, "requestRequiredPermissions: Requesting $missing")
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), 101)
@@ -132,7 +164,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 101) {
             var cameraGranted = false
@@ -142,7 +178,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             Log.d(TAG, "Permissions Result: Camera=$cameraGranted")
-            if (cameraGranted) startCamera() else Toast.makeText(this, "Camera is required", Toast.LENGTH_LONG).show()
+            if (cameraGranted) startCamera() else Toast.makeText(
+                this,
+                "Camera is required",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -151,7 +191,7 @@ class MainActivity : AppCompatActivity() {
         serverIp = configPrefs.getString("server_ip", "") ?: ""
         binding.ipInput.setText(serverIp)
         binding.autoConnectSwitch.isChecked = configPrefs.getBoolean("auto_connect", true)
-        
+
         binding.connectBtn.setOnClickListener {
             val ip = binding.ipInput.text.toString().trim()
             if (ip.isNotEmpty()) {
@@ -162,29 +202,37 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.switchMode.setOnCheckedChangeListener { _, _ -> resetState(); updateConfirmedVisibility() }
-        binding.btnFlash.setOnClickListener { 
+        binding.btnFlash.setOnClickListener {
             cameraInstance?.let { cam ->
                 isFlashOn = !isFlashOn
                 cam.cameraControl.enableTorch(isFlashOn)
                 it.alpha = if (isFlashOn) 1.0f else 0.5f
             }
         }
-        binding.resetBtn.setOnClickListener { 
+        binding.resetBtn.setOnClickListener {
             resetState()
             confirmedMedicines.clear()
-            confirmedAdapter.notifyDataSetChanged() 
-            updateConfirmedVisibility() 
+            confirmedAdapter.notifyDataSetChanged()
+            updateConfirmedVisibility()
         }
         binding.confirmBtn.setOnClickListener { handleConfirmClick() }
-        binding.captureModeBtn.setOnClickListener { startActivity(Intent(this, MedicineDbActivity::class.java)) }
-        
-        binding.btnVoice.setOnClickListener { 
+        binding.captureModeBtn.setOnClickListener {
+            startActivity(
+                Intent(
+                    this,
+                    MedicineDbActivity::class.java
+                )
+            )
+        }
+
+        binding.btnVoice.setOnClickListener {
             if (isListening) stopListening() else startVoiceRecognition()
         }
 
         val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
         binding.qtyToggle.isChecked = settingsPrefs.getBoolean("include_qty", true)
-        binding.qtyContainer.visibility = if (binding.qtyToggle.isChecked) View.VISIBLE else View.GONE
+        binding.qtyContainer.visibility =
+            if (binding.qtyToggle.isChecked) View.VISIBLE else View.GONE
         binding.qtyToggle.setOnCheckedChangeListener { _, isChecked ->
             binding.qtyContainer.visibility = if (isChecked) View.VISIBLE else View.GONE
             settingsPrefs.edit { putBoolean("include_qty", isChecked) }
@@ -218,7 +266,11 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Voice recognition not available", Toast.LENGTH_SHORT).show()
             return
         }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
             Log.w(TAG, "Voice: Missing RECORD_AUDIO permission")
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 101)
             return
@@ -233,12 +285,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN") // Indian English
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                2000L
+            )
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3000L)
         }
 
@@ -251,14 +309,17 @@ class MainActivity : AppCompatActivity() {
                 }
                 startVoiceAnimation()
             }
+
             override fun onBeginningOfSpeech() {
                 Log.d(TAG, "Voice: Speech detected!")
             }
+
             override fun onRmsChanged(rmsdB: Float) {
                 val scale = 1.0f + (rmsdB / 10f).coerceAtLeast(0f)
                 binding.voiceRipple.scaleX = scale; binding.voiceRipple.scaleY = scale
                 binding.voiceRipple.alpha = (rmsdB / 10f).coerceIn(0.1f, 0.6f)
             }
+
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {
                 Log.d(TAG, "Voice: End of speech")
@@ -266,8 +327,9 @@ class MainActivity : AppCompatActivity() {
                     binding.resultTextView.text = getString(R.string.processing_status)
                 }
             }
+
             override fun onError(error: Int) {
-                val errorMsg = when(error) {
+                val errorMsg = when (error) {
                     SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO (mic problem)"
                     SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT (client side)"
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_PERMISSIONS"
@@ -280,26 +342,27 @@ class MainActivity : AppCompatActivity() {
                     else -> "ERROR_UNKNOWN ($error)"
                 }
                 Log.e(TAG, "Voice Error: $error = $errorMsg")
-                
+
                 isListening = false
                 stopVoiceAnimation()
                 binding.voiceRipple.visibility = View.GONE
-                
+
                 startCamera()
-                
+
                 runOnUiThread {
                     binding.statusText.text = "Voice failed: $errorMsg"
                     resetState()
                 }
             }
+
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 Log.d(TAG, "Voice: FINAL RESULTS = $matches")
-                
+
                 isListening = false
                 stopVoiceAnimation()
                 binding.voiceRipple.visibility = View.GONE
-                
+
                 startCamera()
 
                 if (!matches.isNullOrEmpty()) {
@@ -313,6 +376,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+
             override fun onPartialResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
@@ -323,6 +387,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
 
@@ -362,13 +427,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupData() {
         cameraExecutor = Executors.newSingleThreadExecutor()
-        try { beep = ToneGenerator(AudioManager.STREAM_MUSIC, 80) } catch (_: Exception) {}
-        
+        try {
+            beep = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+        } catch (_: Exception) {
+        }
+
         // Start loading detector and repository in parallel
         matchingScope.launch(Dispatchers.IO) {
             pillDetector = PillDetector(this@MainActivity)
         }
-        matchingScope.launch { 
+        matchingScope.launch {
             MedicineRepository.loadIfNeeded(this@MainActivity)
         }
     }
@@ -411,32 +479,35 @@ class MainActivity : AppCompatActivity() {
 
                         imageAnalyzer.setAnalyzer(cameraExecutor) { imageProxy ->
                             try {
-                        val now = System.currentTimeMillis()
-                        
-                        // 1. PILL SCANNING (Runs while searching; locked results should stay stable)
-                        if (!isLocked && !isMatching && !isListening && binding.qtyToggle.isChecked && (now - lastScanTime > 400)) {
-                            pillDetector?.let { detector ->
-                                val bitmap = imageProxy.toDetectorBitmap().centerCrop(0.6f)
-                                val pillCount = detector.detectPills(bitmap)
-                                bitmap.recycle()
-                                if (pillCount > 0) {
-                                    runOnUiThread {
-                                        currentPillCount = pillCount
-                                        if (currentMatch?.isPillLike() != false) {
-                                            currentDetectedQuantity = pillCount
-                                            binding.quantityInput.setText(pillCount.toString())
+                                val now = System.currentTimeMillis()
+
+                                // 1. PILL SCANNING (Runs while searching; locked results should stay stable)
+                                if (!isLocked && !isMatching && !isListening && binding.qtyToggle.isChecked && (now - lastScanTime > 700)) {
+                                    pillDetector?.let { detector ->
+                                        val bitmap = imageProxy.toDetectorBitmap().centerCrop(
+                                            widthPercent = 0.72f,
+                                            heightPercent = 0.32f
+                                        )
+                                        val pillCount = detector.detectPills(bitmap)
+                                        bitmap.recycle()
+                                        if (pillCount > 0) {
+                                            runOnUiThread {
+                                                currentPillCount = pillCount
+                                                if (currentMatch?.isPillLike() != false) {
+                                                    currentDetectedQuantity = pillCount
+                                                    binding.quantityInput.setText(pillCount.toString())
+                                                }
+                                                binding.statusText.text = "PILLS FOUND: $pillCount"
+                                                binding.statusText.setTextColor("#4CAF50".toColorInt())
+                                            }
                                         }
-                                        binding.statusText.text = "PILLS FOUND: $pillCount"
-                                        binding.statusText.setTextColor("#4CAF50".toColorInt())
                                     }
                                 }
-                            }
-                        }
 
-                        if (isLocked || isMatching || isListening || (now - lastScanTime < 400)) {
-                            imageProxy.close()
-                            return@setAnalyzer
-                        }
+                                if (isLocked || isMatching || isListening || (now - lastScanTime < 700)) {
+                                    imageProxy.close()
+                                    return@setAnalyzer
+                                }
                                 lastScanTime = now
                                 processImageWithOCR(imageProxy)
                             } catch (e: Exception) {
@@ -467,7 +538,7 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Camera preview failed to start", Toast.LENGTH_LONG).show()
                     lastError?.let { Log.e(TAG, "Cam Error", it) }
                 }
-            } catch (exc: Exception) { 
+            } catch (exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
                 binding.resultTextView.text = "CAMERA ERROR"
                 binding.resultTextView.setTextColor("#F44336".toColorInt())
@@ -482,13 +553,21 @@ class MainActivity : AppCompatActivity() {
             val cameraProvider = cameraProviderFuture.get()
             cameraProvider.unbindAll()
             cameraInstance = null
-        } catch (e: Exception) { Log.e(TAG, "stopCamera Error", e) }
+        } catch (e: Exception) {
+            Log.e(TAG, "stopCamera Error", e)
+        }
     }
 
     private fun startScanAnimation() {
         binding.scanLine.post {
-            ObjectAnimator.ofFloat(binding.scanLine, "y", binding.scanBox.top.toFloat(), binding.scanBox.bottom.toFloat()).apply {
-                duration = 1500; repeatMode = ValueAnimator.REVERSE; repeatCount = ValueAnimator.INFINITE
+            ObjectAnimator.ofFloat(
+                binding.scanLine,
+                "y",
+                binding.scanBox.top.toFloat(),
+                binding.scanBox.bottom.toFloat()
+            ).apply {
+                duration = 1500; repeatMode = ValueAnimator.REVERSE; repeatCount =
+                ValueAnimator.INFINITE
                 interpolator = LinearInterpolator(); start()
             }
         }
@@ -496,24 +575,152 @@ class MainActivity : AppCompatActivity() {
 
     @OptIn(ExperimentalGetImage::class)
     private fun processImageWithOCR(imageProxy: ImageProxy) {
-        val mediaImage = imageProxy.image ?: run { imageProxy.close(); return }
 
-        val imageWidth = imageProxy.width; val imageHeight = imageProxy.height
-        val side = (min(imageWidth, imageHeight) * 0.6).toInt()
-        mediaImage.cropRect = Rect((imageWidth - side) / 2, (imageHeight - side) / 2, (imageWidth + side) / 2, (imageHeight + side) / 2)
-        val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-        recognizer.process(image)
-            .addOnSuccessListener { visionText ->
-                val filteredLines = visionText.textBlocks.flatMap { it.lines }
-                    .map { it.text.trim() }
-                    .filter { text -> text.length >= 3 && junkPatterns.none { text.contains(it, true) } }
-                val fullText = filteredLines.joinToString(" ")
-                if (fullText.length >= 3) {
-                    Log.d(TAG, "OCR Detected: $fullText")
-                    processRawOutput(fullText)
+        try {
+
+            val bitmap = imageProxy.toDetectorBitmap()
+
+            val croppedBitmap = bitmap.centerCrop(
+                widthPercent = 0.72f,
+                heightPercent = 0.32f
+            )
+
+            // =========================
+            // GLARE DETECTION
+            // =========================
+
+            lastGlareStatus = hasExcessiveGlare(croppedBitmap)
+
+            if (lastGlareStatus) {
+
+                runOnUiThread {
+
+                    binding.statusText.text =
+                        "Too much glare - tilt strip"
+
+                    binding.statusText.setTextColor(
+                        "#F44336".toColorInt()
+                    )
                 }
+
+                bitmap.recycle()
+                croppedBitmap.recycle()
+                imageProxy.close()
+                return
             }
-            .addOnCompleteListener { imageProxy.close() }
+
+
+            // =========================
+            // BLUR DETECTION
+            // =========================
+
+            lastBlurStatus = isBlurry(croppedBitmap)
+
+            if (lastBlurStatus) {
+
+                runOnUiThread {
+
+                    binding.statusText.text =
+                        "Image blurry - hold steady"
+
+                    binding.statusText.setTextColor(
+                        "#FF9800".toColorInt()
+                    )
+                }
+
+                bitmap.recycle()
+                croppedBitmap.recycle()
+                imageProxy.close()
+                return
+            }
+
+            // =========================
+            // BRAND REGION
+            // =========================
+
+            val brandBitmap =
+                cropBrandRegion(croppedBitmap)
+
+            val processedBitmap =
+                preprocessForOCR(brandBitmap)
+
+            val image =
+                InputImage.fromBitmap(
+                    processedBitmap,
+                    0
+                )
+
+            recognizer.process(image)
+
+                .addOnSuccessListener { visionText ->
+
+                    val fullText =
+                        visionText.text
+                            .replace("\n", " ")
+                            .trim()
+
+                    Log.d(
+                        TAG,
+                        "OCR TEXT: $fullText"
+                    )
+
+                    if (fullText.length >= 3) {
+
+                        processRawOutput(fullText)
+
+                    } else {
+
+                        runOnUiThread {
+
+                            binding.statusText.text =
+                                "Move closer to strip"
+
+                            binding.statusText.setTextColor(
+                                "#FF9800".toColorInt()
+                            )
+                        }
+                    }
+                }
+
+                .addOnFailureListener { e ->
+
+                    Log.e(
+                        TAG,
+                        "OCR FAILED",
+                        e
+                    )
+
+                    runOnUiThread {
+
+                        binding.statusText.text =
+                            "OCR failed"
+
+                        binding.statusText.setTextColor(
+                            "#F44336".toColorInt()
+                        )
+                    }
+                }
+
+                .addOnCompleteListener {
+
+                    bitmap.recycle()
+                    croppedBitmap.recycle()
+                    brandBitmap.recycle()
+                    processedBitmap.recycle()
+
+                    imageProxy.close()
+                }
+
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "processImageWithOCR ERROR",
+                e
+            )
+
+            imageProxy.close()
+        }
     }
 
     private fun processRawOutput(text: String) {
@@ -529,7 +736,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        
+
         isMatching = true
         matchingScope.launch(Dispatchers.Default) {
             val matches = Matcher.findTopMatches(text, blacklist, 3)
@@ -538,7 +745,8 @@ class MainActivity : AppCompatActivity() {
                 if (matches.isEmpty()) {
                     Log.e("MATCHER_DEBUG", "NO MATCHES FOUND!")
                     binding.statusText.text = "No match for: $text"
-                    Toast.makeText(this@MainActivity, "No matches - try again", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "No matches - try again", Toast.LENGTH_LONG)
+                        .show()
                 } else {
                     Log.d("MATCHER_DEBUG", "Showing ${matches.size} suggestions to user")
                     showSuggestionsUI(text, matches)
@@ -548,22 +756,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSuggestionsUI(rawText: String, matches: List<Matcher.ScoredMatch>) {
-        if (binding.switchMode.isChecked) { onMedicineDetected(matches.first().medicine); return }
+        if (binding.switchMode.isChecked) {
+            onMedicineDetected(matches.first().medicine); return
+        }
         binding.top3Choices.removeAllViews(); binding.top3Container.visibility = View.VISIBLE
         matches.forEach { scored ->
             val med = scored.medicine
             val layout = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
-                setPadding(0, 8, 0, 8); background = ContextCompat.getDrawable(this@MainActivity, android.R.drawable.list_selector_background)
+                orientation = LinearLayout.HORIZONTAL; gravity =
+                android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, 8, 0, 8); background = ContextCompat.getDrawable(
+                this@MainActivity,
+                android.R.drawable.list_selector_background
+            )
                 isClickable = true; isFocusable = true
             }
             val nameBtn = TextView(this).apply {
-                text = "${med.name.uppercase()} (${scored.score.toInt()}%)"; textSize = 15f; setTextColor("#4CAF50".toColorInt())
+                text = "${med.name.uppercase()} (${scored.score.toInt()}%)"; textSize =
+                15f; setTextColor("#4CAF50".toColorInt())
                 layoutParams = LinearLayout.LayoutParams(0, -2, 1f); setPadding(16, 24, 16, 24)
             }
             val wrongBtn = ImageButton(this).apply {
-                setImageResource(android.R.drawable.ic_menu_close_clear_cancel); background = ContextCompat.getDrawable(this@MainActivity, android.R.drawable.btn_default)
-                backgroundTintList = android.content.res.ColorStateList.valueOf("#33F44336".toColorInt()); setColorFilter("#F44336".toColorInt())
+                setImageResource(android.R.drawable.ic_menu_close_clear_cancel); background =
+                ContextCompat.getDrawable(this@MainActivity, android.R.drawable.btn_default)
+                backgroundTintList =
+                    android.content.res.ColorStateList.valueOf("#33F44336".toColorInt()); setColorFilter(
+                "#F44336".toColorInt()
+            )
                 setOnClickListener { blacklist.add(med.name); processRawOutput(rawText) }
             }
             layout.setOnClickListener {
@@ -573,7 +792,10 @@ class MainActivity : AppCompatActivity() {
             layout.addView(nameBtn); layout.addView(wrongBtn); binding.top3Choices.addView(layout)
         }
         binding.resultTextView.text = getString(R.string.select_match_instruction)
-        binding.resultTextView.setTextColor("#FF9800".toColorInt()); beep?.startTone(ToneGenerator.TONE_PROP_BEEP, 100)
+        binding.resultTextView.setTextColor("#FF9800".toColorInt()); beep?.startTone(
+            ToneGenerator.TONE_PROP_BEEP,
+            100
+        )
     }
 
     private fun onMedicineDetected(med: Medicine) {
@@ -582,12 +804,17 @@ class MainActivity : AppCompatActivity() {
             if (!confirmedMedicines.any { it.id == med.id }) {
                 confirmedMedicines.add(0, med); confirmedAdapter.notifyItemInserted(0)
                 binding.confirmedRecyclerView.scrollToPosition(0); updateConfirmedVisibility()
-                beep?.startTone(ToneGenerator.TONE_PROP_BEEP, 100); binding.confirmBtn.isEnabled = true
+                beep?.startTone(ToneGenerator.TONE_PROP_BEEP, 100); binding.confirmBtn.isEnabled =
+                    true
             }
         } else {
             isLocked = true; currentMatch = med
-            binding.resultTextView.text = formatDetectionResult(med.name); binding.resultTextView.setTextColor("#4CAF50".toColorInt())
-            beep?.startTone(ToneGenerator.TONE_PROP_BEEP, 100); vibrateFeedback(50); binding.confirmBtn.isEnabled = true
+            binding.resultTextView.text =
+                formatDetectionResult(med.name); binding.resultTextView.setTextColor("#4CAF50".toColorInt())
+            beep?.startTone(
+                ToneGenerator.TONE_PROP_BEEP,
+                100
+            ); vibrateFeedback(50); binding.confirmBtn.isEnabled = true
         }
     }
 
@@ -619,26 +846,50 @@ class MainActivity : AppCompatActivity() {
             .replace(".", " ")
             .replace("-", " ")
 
-        val unitPattern = Regex("""\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b""")
+        val unitPattern =
+            Regex("""\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b""")
         unitPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
 
         val stripCountPattern = Regex("""\b(\d{1,3})\s*'?S\b""")
-        stripCountPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        stripCountPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.let { return it }
 
         return null
     }
 
     private fun Medicine.isPillLike(): Boolean {
         val tokens = MedicineRepository.tokenize(name).toSet()
-        return tokens.any { it in setOf("TAB", "TABS", "TABLET", "TABLETS", "CAP", "CAPS", "CAPSULE", "CAPSULES", "BOLUS", "SOFTGEL") }
-            || name.uppercase(Locale.ROOT).contains("SOFT GEL")
+        return tokens.any {
+            it in setOf(
+                "TAB",
+                "TABS",
+                "TABLET",
+                "TABLETS",
+                "CAP",
+                "CAPS",
+                "CAPSULE",
+                "CAPSULES",
+                "BOLUS",
+                "SOFTGEL"
+            )
+        }
+                || name.uppercase(Locale.ROOT).contains("SOFT GEL")
     }
 
     private fun handleConfirmClick() {
-        val action = if (getSharedPreferences("settings", MODE_PRIVATE).getString("action_mode", "enter") == "tab") "tab" else "enter"
-        val includeQty = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("include_qty", true)
-        val list = if (binding.switchMode.isChecked) confirmedMedicines.toList() else currentMatch?.let { listOf(it) } ?: emptyList()
-        val sampleText = list.map { it.name }.joinToString(", ").ifBlank { latestScanText.orEmpty() }
+        val action = if (getSharedPreferences("settings", MODE_PRIVATE).getString(
+                "action_mode",
+                "enter"
+            ) == "tab"
+        ) "tab" else "enter"
+        val includeQty =
+            getSharedPreferences("settings", MODE_PRIVATE).getBoolean("include_qty", true)
+        val list =
+            if (binding.switchMode.isChecked) confirmedMedicines.toList() else currentMatch?.let {
+                listOf(it)
+            } ?: emptyList()
+        val sampleText =
+            list.map { it.name }.joinToString(", ").ifBlank { latestScanText.orEmpty() }
         val quantity = if (includeQty) {
             binding.quantityInput.text.toString().toIntOrNull() ?: currentDetectedQuantity
         } else {
@@ -649,26 +900,36 @@ class MainActivity : AppCompatActivity() {
         binding.statusText.text = sampleSaveMessage
 
         if (serverIp.isEmpty()) {
-            Toast.makeText(this, "$sampleSaveMessage. Please enter Server IP first", Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                "$sampleSaveMessage. Please enter Server IP first",
+                Toast.LENGTH_LONG
+            ).show()
             return
         }
 
         if (list.isNotEmpty()) {
             matchingScope.launch(Dispatchers.IO) {
-                withContext(Dispatchers.Main) { 
+                withContext(Dispatchers.Main) {
                     binding.syncLoader.visibility = View.VISIBLE
                     binding.buttonLayout.alpha = 0.5f
                     binding.confirmBtn.isEnabled = false; binding.resetBtn.isEnabled = false
                 }
-                val success = sendDataToServer(list.map { it.name }, includeQty, action, quantity, sampleSaveMessage)
+                val success = sendDataToServer(
+                    list.map { it.name },
+                    includeQty,
+                    action,
+                    quantity,
+                    sampleSaveMessage
+                )
                 withContext(Dispatchers.Main) {
                     binding.syncLoader.visibility = View.GONE
                     binding.buttonLayout.alpha = 1.0f
                     binding.confirmBtn.isEnabled = true; binding.resetBtn.isEnabled = true
                     if (success) {
                         blacklist.clear(); resetState()
-                        if (binding.switchMode.isChecked) { 
-                            confirmedMedicines.clear(); confirmedAdapter.notifyDataSetChanged(); updateConfirmedVisibility() 
+                        if (binding.switchMode.isChecked) {
+                            confirmedMedicines.clear(); confirmedAdapter.notifyDataSetChanged(); updateConfirmedVisibility()
                         }
                     }
                 }
@@ -710,10 +971,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun sendDataToServer(itemNames: List<String>, includeQty: Boolean, action: String, quantity: Int?, sampleSaveMessage: String): Boolean {
+    private suspend fun sendDataToServer(
+        itemNames: List<String>,
+        includeQty: Boolean,
+        action: String,
+        quantity: Int?,
+        sampleSaveMessage: String
+    ): Boolean {
         return try {
             val json = JSONObject().apply {
-                put("items", JSONArray(itemNames)); put("quantityEnabled", includeQty); put("action", action)
+                put("items", JSONArray(itemNames)); put(
+                "quantityEnabled",
+                includeQty
+            ); put("action", action)
                 if (quantity != null && quantity > 0) {
                     put("quantity", quantity)
                     put("quantities", JSONArray(List(itemNames.size) { quantity }))
@@ -724,47 +994,76 @@ class MainActivity : AppCompatActivity() {
                 socket.getOutputStream().write(json.toString().toByteArray(Charsets.UTF_8))
                 socket.getOutputStream().flush()
             }
-            withContext(Dispatchers.Main) { 
+            withContext(Dispatchers.Main) {
                 Toast.makeText(this@MainActivity, "Sent to Desktop", Toast.LENGTH_SHORT).show()
-                vibrateFeedback(100) 
+                vibrateFeedback(100)
             }
             true
         } catch (e: Exception) {
-            withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "$sampleSaveMessage. Send Failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "$sampleSaveMessage. Send Failed: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
             false
         }
     }
 
     private fun resetState() {
-        isLocked = false; isMatching = false; currentMatch = null; currentDetectedQuantity = null; currentPillCount = null; currentVisiblePackQuantity = null; latestScanText = null; matchCounts.clear()
+        isLocked = false; isMatching = false; currentMatch = null; currentDetectedQuantity =
+            null; currentPillCount = null; currentVisiblePackQuantity = null; latestScanText =
+            null; matchCounts.clear()
         runOnUiThread {
-            binding.resultTextView.text = getString(R.string.ready_status); binding.resultTextView.setTextColor("#E0E0E0".toColorInt())
+            binding.resultTextView.text =
+                getString(R.string.ready_status); binding.resultTextView.setTextColor("#E0E0E0".toColorInt())
             binding.quantityInput.setText("1")
             binding.loader.visibility = View.GONE; binding.top3Container.visibility = View.GONE
             if (confirmedMedicines.isEmpty()) binding.confirmBtn.isEnabled = false
         }
     }
 
-    private fun updateConfirmedVisibility() { binding.confirmedRecyclerView.visibility = if (binding.switchMode.isChecked && confirmedMedicines.isNotEmpty()) View.VISIBLE else View.GONE }
+    private fun updateConfirmedVisibility() {
+        binding.confirmedRecyclerView.visibility =
+            if (binding.switchMode.isChecked && confirmedMedicines.isNotEmpty()) View.VISIBLE else View.GONE
+    }
 
     private fun scanNetwork() {
         matchingScope.launch(Dispatchers.IO) {
             val wifi = getSystemService(WIFI_SERVICE) as WifiManager
-            val ipInt = try { @Suppress("DEPRECATION") wifi.connectionInfo.ipAddress } catch (_: Exception) { 0 }
+            val ipInt = try {
+                @Suppress("DEPRECATION") wifi.connectionInfo.ipAddress
+            } catch (_: Exception) {
+                0
+            }
             if (ipInt == 0) return@launch
-            val subnet = String.format(Locale.US, "%d.%d.%d", (ipInt and 0xff), (ipInt shr 8 and 0xff), (ipInt shr 16 and 0xff))
+            val subnet = String.format(
+                Locale.US,
+                "%d.%d.%d",
+                (ipInt and 0xff),
+                (ipInt shr 8 and 0xff),
+                (ipInt shr 16 and 0xff)
+            )
             for (i in 1..254) {
-                val testIP = "$subnet.$i"; try { Socket().use { it.connect(InetSocketAddress(testIP, 5001), 100) }
-                    withContext(Dispatchers.Main) { binding.ipInput.setText(testIP); serverIp = testIP; checkHealth(testIP) }
+                val testIP = "$subnet.$i"; try {
+                    Socket().use { it.connect(InetSocketAddress(testIP, 5001), 100) }
+                    withContext(Dispatchers.Main) {
+                        binding.ipInput.setText(testIP); serverIp = testIP; checkHealth(testIP)
+                    }
                     return@launch
-                } catch (_: Exception) {}
+                } catch (_: Exception) {
+                }
             }
         }
     }
 
     private fun checkHealth(ip: String) {
         matchingScope.launch(Dispatchers.IO) {
-            var success = false; try { Socket().use { it.connect(InetSocketAddress(ip, 5001), 1000) }; success = true } catch (_: Exception) { }
+            var success = false; try {
+            Socket().use { it.connect(InetSocketAddress(ip, 5001), 1000) }; success = true
+        } catch (_: Exception) {
+        }
             withContext(Dispatchers.Main) {
                 binding.statusText.text = if (success) "CONNECTED" else "DISCONNECTED"
                 binding.statusText.setTextColor(if (success) "#4CAF50".toColorInt() else "#F44336".toColorInt())
@@ -772,43 +1071,85 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startAutoReconnect() { matchingScope.launch { while (isActive) { delay(5000); if (binding.autoConnectSwitch.isChecked && serverIp.isNotEmpty()) checkHealth(serverIp) } } }
+    private fun startAutoReconnect() {
+        matchingScope.launch {
+            while (isActive) {
+                delay(5000); if (binding.autoConnectSwitch.isChecked && serverIp.isNotEmpty()) checkHealth(
+                    serverIp
+                )
+            }
+        }
+    }
 
     private fun vibrateFeedback(duration: Long) {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            val vibratorManager =
+                getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
             vibratorManager.defaultVibrator
         } else {
             @Suppress("DEPRECATION") getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
         vibrator.let {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) it.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) it.vibrate(
+                VibrationEffect.createOneShot(
+                    duration,
+                    VibrationEffect.DEFAULT_AMPLITUDE
+                )
+            )
             else @Suppress("DEPRECATION") it.vibrate(duration)
         }
     }
 
-    override fun onDestroy() { 
-        super.onDestroy(); cameraExecutor.shutdown(); matchingScope.cancel(); recognizer.close(); pillDetector?.close(); beep?.release(); speechRecognizer?.destroy(); _binding = null
+    override fun onDestroy() {
+        super.onDestroy(); cameraExecutor.shutdown(); matchingScope.cancel(); recognizer.close(); pillDetector?.close(); beep?.release(); speechRecognizer?.destroy(); _binding =
+            null
     }
 
-    private class ConfirmedMedicineAdapter(private val list: List<Medicine>, private val onDeleteClick: (Int) -> Unit) : RecyclerView.Adapter<ConfirmedMedicineAdapter.ViewHolder>() {
-        class ViewHolder(view: View) : RecyclerView.ViewHolder(view) { val nameTv: TextView = view.findViewById(R.id.tvConfirmedName); val deleteBtn: ImageButton = view.findViewById(R.id.btnDelete) }
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) = ViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_confirmed_medicine, parent, false))
+    private class ConfirmedMedicineAdapter(
+        private val list: List<Medicine>,
+        private val onDeleteClick: (Int) -> Unit
+    ) : RecyclerView.Adapter<ConfirmedMedicineAdapter.ViewHolder>() {
+        class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+            val nameTv: TextView = view.findViewById(R.id.tvConfirmedName);
+            val deleteBtn: ImageButton = view.findViewById(R.id.btnDelete)
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) = ViewHolder(
+            LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_confirmed_medicine, parent, false)
+        )
+
         override fun onBindViewHolder(holder: ViewHolder, position: Int) {
             holder.nameTv.text = list[position].name.uppercase()
-            holder.deleteBtn.setOnClickListener { val pos = holder.bindingAdapterPosition; if (pos != RecyclerView.NO_POSITION) onDeleteClick(pos) }
+            holder.deleteBtn.setOnClickListener {
+                val pos =
+                    holder.bindingAdapterPosition; if (pos != RecyclerView.NO_POSITION) onDeleteClick(
+                pos
+            )
+            }
         }
+
         override fun getItemCount() = list.size
     }
 
     private fun ImageProxy.toDetectorBitmap(): Bitmap {
         val nv21 = toNv21()
-        val yuvImage = android.graphics.YuvImage(nv21, android.graphics.ImageFormat.NV21, this.width, this.height, null)
+        val yuvImage = android.graphics.YuvImage(
+            nv21,
+            android.graphics.ImageFormat.NV21,
+            this.width,
+            this.height,
+            null
+        )
         val out = java.io.ByteArrayOutputStream()
-        yuvImage.compressToJpeg(android.graphics.Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
+        yuvImage.compressToJpeg(
+            android.graphics.Rect(0, 0, yuvImage.width, yuvImage.height),
+            100,
+            out
+        )
         val imageBytes = out.toByteArray()
         val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-        
+
         if (imageInfo.rotationDegrees == 0) return bitmap
         val matrix = android.graphics.Matrix()
         matrix.postRotate(imageInfo.rotationDegrees.toFloat())
@@ -826,16 +1167,142 @@ class MainActivity : AppCompatActivity() {
         return token.replace("[^A-Z]".toRegex(), "").ifBlank { normalized }
     }
 
-    private fun Bitmap.centerCrop(fraction: Float): Bitmap {
-        val cropFraction = fraction.coerceIn(0.1f, 1f)
-        val cropWidth = (width * cropFraction).toInt()
-        val cropHeight = (height * cropFraction).toInt()
-        val left = (width - cropWidth) / 2
-        val top = (height - cropHeight) / 2
-        val cropped = Bitmap.createBitmap(this, left, top, cropWidth, cropHeight)
-        recycle()
-        return cropped
+    private fun cropBrandRegion(bitmap: Bitmap): Bitmap {
+
+        return Bitmap.createBitmap(
+            bitmap,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height / 3
+        )
     }
+
+    private fun preprocessForOCR(bitmap: Bitmap): Bitmap {
+
+        val width = bitmap.width
+        val height = bitmap.height
+
+        val processed = Bitmap.createBitmap(
+            width,
+            height,
+            Bitmap.Config.ARGB_8888
+        )
+
+        for (x in 0 until width) {
+
+            for (y in 0 until height) {
+
+                val pixel = bitmap.getPixel(x, y)
+
+                val r = Color.red(pixel)
+                val g = Color.green(pixel)
+                val b = Color.blue(pixel)
+
+                val gray =
+                    (0.3 * r + 0.59 * g + 0.11 * b).toInt()
+
+                val enhanced = when {
+
+                    gray > 220 -> 255
+                    gray > 160 -> 220
+                    gray > 100 -> 150
+                    else -> 50
+                }
+
+                val newPixel =
+                    Color.rgb(
+                        enhanced,
+                        enhanced,
+                        enhanced
+                    )
+
+                processed.setPixel(
+                    x,
+                    y,
+                    newPixel
+                )
+            }
+        }
+
+        return processed
+    }
+
+    private fun hasExcessiveGlare(bitmap: Bitmap): Boolean {
+
+        var brightPixels = 0
+        var totalPixels = 0
+
+        for (x in 0 until bitmap.width step 5) {
+
+            for (y in 0 until bitmap.height step 5) {
+
+                val pixel = bitmap.getPixel(x, y)
+
+                val r = Color.red(pixel)
+                val g = Color.green(pixel)
+                val b = Color.blue(pixel)
+
+                val brightness =
+                    (r + g + b) / 3
+
+                if (brightness > 245) {
+                    brightPixels++
+                }
+
+                totalPixels++
+            }
+        }
+
+        val ratio =
+            brightPixels.toFloat() / totalPixels
+
+        return ratio > 0.15f
+    }
+
+    private fun isBlurry(bitmap: Bitmap): Boolean {
+
+        var diffSum = 0L
+        var count = 0
+
+        for (x in 1 until bitmap.width step 5) {
+
+            for (y in 1 until bitmap.height step 5) {
+
+                val current =
+                    bitmap.getPixel(x, y)
+
+                val previous =
+                    bitmap.getPixel(x - 1, y - 1)
+
+                val currentGray =
+                    (
+                            Color.red(current) +
+                                    Color.green(current) +
+                                    Color.blue(current)
+                            ) / 3
+
+                val previousGray =
+                    (
+                            Color.red(previous) +
+                                    Color.green(previous) +
+                                    Color.blue(previous)
+                            ) / 3
+
+                diffSum += kotlin.math.abs(
+                    currentGray - previousGray
+                )
+
+                count++
+            }
+        }
+
+        val averageDiff =
+            diffSum.toFloat() / count
+
+        return averageDiff < 5f
+    }
+
 
     private fun ImageProxy.toNv21(): ByteArray {
         val nv21 = ByteArray(width * height * 3 / 2)
@@ -864,5 +1331,25 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return nv21
+    }
+
+    private fun Bitmap.centerCrop(
+        widthPercent: Float,
+        heightPercent: Float
+    ): Bitmap {
+
+        val cropWidth = (width * widthPercent).toInt()
+        val cropHeight = (height * heightPercent).toInt()
+
+        val left = (width - cropWidth) / 2
+        val top = (height - cropHeight) / 2
+
+        return Bitmap.createBitmap(
+            this,
+            left,
+            top,
+            cropWidth,
+            cropHeight
+        )
     }
 }
