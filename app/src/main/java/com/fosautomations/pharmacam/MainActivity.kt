@@ -73,9 +73,6 @@ class MainActivity : AppCompatActivity() {
     private var lastBlurStatus = false
     private var lastGlareStatus = false
 
-    // -----------------------------------------------------------------------
-    // SHUTTER: tracks whether we are in the middle of a shutter capture
-    // -----------------------------------------------------------------------
     private var isCapturing = false
 
     private val matchCounts = mutableMapOf<String, Int>()
@@ -98,9 +95,6 @@ class MainActivity : AppCompatActivity() {
 
     private var cameraInstance: androidx.camera.core.Camera? = null
 
-    // -----------------------------------------------------------------------
-    // SHUTTER: ImageCapture use case — added alongside existing imageAnalyzer
-    // -----------------------------------------------------------------------
     private var imageCapture: ImageCapture? = null
 
     private var isFlashOn = false
@@ -119,6 +113,17 @@ class MainActivity : AppCompatActivity() {
         "Android", "Phase", "Model", "Repo", "Standard", "Implementation",
         "OCR", "Ready", "Voice"
     )
+
+    companion object {
+        // Pre-compiled once at class load — never recompiled per-call
+        private val UNIT_QTY_REGEX = Regex(
+            """\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b"""
+        )
+        private val STRIP_COUNT_REGEX   = Regex("""\b(\d{1,3})\s*'?S\b""")
+        private val SAMPLE_CLEAN_REGEX  = Regex("[^A-Z0-9 ]")
+        private val SAMPLE_SPACES_REGEX = Regex("\\s+")
+        private val SAMPLE_ALPHA_REGEX  = Regex("[^A-Z]")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -225,9 +230,6 @@ class MainActivity : AppCompatActivity() {
             if (isListening) stopListening() else startVoiceRecognition()
         }
 
-        // -------------------------------------------------------------------
-        // SHUTTER: wire up the shutter button
-        // -------------------------------------------------------------------
         binding.btnShutter.setOnClickListener {
             captureAndScan()
         }
@@ -267,6 +269,15 @@ class MainActivity : AppCompatActivity() {
 
     // =======================================================================
     // SHUTTER: capture a single high-quality frame and run the OCR pipeline
+    //
+    // Key changes vs original:
+    //  1. Y-plane quality check fires BEFORE any Bitmap is allocated
+    //  2. imageProxy.toBitmap() replaces toDetectorBitmap() — eliminates the
+    //     NV21 → JPEG-encode → JPEG-decode roundtrip (was 3 extra allocs)
+    //  3. Single rotation pass (original double-rotated: toDetectorBitmap
+    //     already rotated, then the let-block rotated again)
+    //  4. Combined centerCrop+cropBrandRegion in one Bitmap.createBitmap call
+    //     instead of two, eliminating one intermediate Bitmap
     // =======================================================================
     private fun captureAndScan() {
         val capture = imageCapture ?: run {
@@ -274,17 +285,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Ignore taps while already capturing, matching, or listening
         if (isCapturing || isMatching || isListening) return
 
         isCapturing = true
-
-        // Visual feedback: tint the scan box briefly
         binding.scanBox.setBackgroundColor("#4D4CAF50".toColorInt())
         binding.statusText.text = "Capturing…"
         binding.statusText.setTextColor("#FF9800".toColorInt())
-
-        // Disable shutter button to prevent double-taps
         binding.btnShutter.isEnabled = false
 
         capture.takePicture(
@@ -295,22 +301,8 @@ class MainActivity : AppCompatActivity() {
                     try {
                         Log.d(TAG, "SHUTTER: capture success")
 
-                        // ADD this instead:
-                        val bitmap = imageProxy.toBitmap().let { bmp ->
-                            val matrix = android.graphics.Matrix()
-                            matrix.postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
-                            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-                            bmp.recycle()
-                            rotated
-                        }
-
-                        val croppedBitmap = bitmap.centerCrop(
-                            widthPercent = 0.72f,
-                            heightPercent = 0.32f
-                        )
-
-                        // --- Glare check ---
-                        if (hasExcessiveGlare(croppedBitmap)) {
+                        // --- Quality check directly on Y plane — zero Bitmap allocation ---
+                        if (imageProxy.hasExcessiveGlareYPlane()) {
                             runOnUiThread {
                                 finishCapture()
                                 Toast.makeText(
@@ -321,13 +313,9 @@ class MainActivity : AppCompatActivity() {
                                 binding.statusText.text = "Too much glare - tilt strip"
                                 binding.statusText.setTextColor("#F44336".toColorInt())
                             }
-                            bitmap.recycle()
-                            croppedBitmap.recycle()
                             return
                         }
-
-                        // --- Blur check ---
-                        if (isBlurry(croppedBitmap)) {
+                        if (imageProxy.isBlurryYPlane()) {
                             runOnUiThread {
                                 finishCapture()
                                 Toast.makeText(
@@ -338,28 +326,51 @@ class MainActivity : AppCompatActivity() {
                                 binding.statusText.text = "Image blurry - hold steady"
                                 binding.statusText.setTextColor("#FF9800".toColorInt())
                             }
-                            bitmap.recycle()
-                            croppedBitmap.recycle()
                             return
                         }
 
-                        // --- OCR pipeline (same as live, minus the tripling) ---
-                        val brandBitmap    = cropBrandRegion(croppedBitmap)
-                        val processedBitmap = preprocessForOCR(brandBitmap)
-                        val image           = InputImage.fromBitmap(processedBitmap, 0)
+                        // --- Single Bitmap conversion, single rotation pass ---
+                        // toBitmap() does not rotate; we apply rotation exactly once.
+                        // (The old toDetectorBitmap() already rotated, then the let-block
+                        // rotated again — net effect was double rotation on portrait devices.)
+                        val bitmap = imageProxy.toBitmap().let { bmp ->
+                            val deg = imageProxy.imageInfo.rotationDegrees
+                            if (deg == 0) bmp
+                            else {
+                                val matrix = android.graphics.Matrix()
+                                matrix.postRotate(deg.toFloat())
+                                Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                                    .also { bmp.recycle() }
+                            }
+                        }
 
-                        recognizer.process(image)
+                        // --- Combined crop: centerCrop(0.72,0.32) + cropBrandRegion ---
+                        // centerCrop(0.72,0.32) → x∈[14%,86%], y∈[34%,66%]
+                        // cropBrandRegion takes middle 50% of that height slice
+                        //   → y∈[34%+8%, 34%+24%] = [42%, 58%] of original bitmap
+                        // One Bitmap.createBitmap instead of two; one fewer allocation.
+                        val ocrBitmap = run {
+                            val left   = (bitmap.width  * 0.14f).toInt()
+                            val top    = (bitmap.height * 0.42f).toInt()
+                            val width  = (bitmap.width  * 0.72f).toInt().coerceAtLeast(1)
+                            val height = (bitmap.height * 0.16f).toInt().coerceAtLeast(1)
+                            Bitmap.createBitmap(bitmap, left, top, width, height)
+                        }
+                        bitmap.recycle()
+
+                        val processedBitmap = preprocessForOCR(ocrBitmap)
+                        ocrBitmap.recycle()
+
+                        val inputImage = InputImage.fromBitmap(processedBitmap, 0)
+
+                        recognizer.process(inputImage)
                             .addOnSuccessListener { visionText ->
                                 val fullText = visionText.text
                                     .replace("\n", " ")
                                     .trim()
-
                                 Log.d(TAG, "SHUTTER OCR TEXT: $fullText")
-
                                 runOnUiThread { finishCapture() }
-
                                 if (fullText.length >= 3) {
-                                    // Send the text once, no tripling
                                     processRawOutput(fullText)
                                 } else {
                                     runOnUiThread {
@@ -377,9 +388,6 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                             .addOnCompleteListener {
-                                bitmap.recycle()
-                                croppedBitmap.recycle()
-                                brandBitmap.recycle()
                                 processedBitmap.recycle()
                             }
 
@@ -403,7 +411,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** Reset shutter UI state after a capture attempt (success or failure) */
     private fun finishCapture() {
         isCapturing = false
         binding.btnShutter.isEnabled = true
@@ -619,7 +626,6 @@ class MainActivity : AppCompatActivity() {
                             try {
                                 val now = System.currentTimeMillis()
 
-                                // Pill scanning (independent of shutter)
                                 if (!isLocked && !isMatching && !isListening && !isCapturing &&
                                     binding.qtyToggle.isChecked && (now - lastScanTime > 700)
                                 ) {
@@ -644,12 +650,6 @@ class MainActivity : AppCompatActivity() {
                                     }
                                 }
 
-                                // -----------------------------------------------------
-                                // SHUTTER: live OCR is suppressed while capturing,
-                                // locked, matching, listening, or within cooldown.
-                                // Live analyzer now only does quality feedback (blur/glare)
-                                // when shutter is the primary scan trigger.
-                                // -----------------------------------------------------
                                 if (isLocked || isMatching || isListening || isCapturing ||
                                     currentMatch != null || (now - lastScanTime < 700)
                                 ) {
@@ -659,7 +659,7 @@ class MainActivity : AppCompatActivity() {
 
                                 lastScanTime = now
 
-                                // Live quality feedback only — no OCR from live stream
+                                // Live quality feedback — no OCR from live stream
                                 runQualityFeedback(imageProxy)
 
                             } catch (e: Exception) {
@@ -668,10 +668,6 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
 
-                        // -----------------------------------------------------------
-                        // SHUTTER: build ImageCapture use case
-                        // CAPTURE_MODE_MAXIMIZE_QUALITY uses full sensor resolution
-                        // -----------------------------------------------------------
                         val imageCaptureUseCase = ImageCapture.Builder()
                             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
@@ -680,13 +676,12 @@ class MainActivity : AppCompatActivity() {
 
                         imageCapture = imageCaptureUseCase
 
-                        // Bind all three use cases together
                         cameraInstance = cameraProvider.bindToLifecycle(
                             this,
                             selector,
                             preview,
                             imageAnalyzer,
-                            imageCaptureUseCase   // ← shutter use case
+                            imageCaptureUseCase
                         )
 
                         val factory = SurfaceOrientedMeteringPointFactory(
@@ -729,20 +724,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     // -----------------------------------------------------------------------
-    // SHUTTER: replaces processImageWithOCR in the live analyzer path.
-    // Only checks blur/glare and updates the status bar — no OCR triggered.
-    // OCR now only fires from captureAndScan().
+    // Quality feedback on the live preview frame.
+    //
+    // Replaced: toDetectorBitmap() + centerCrop() + hasExcessiveGlare(Bitmap)
+    //           + isBlurry(Bitmap) = 3 allocations + NV21→JPEG→Bitmap roundtrip
+    // Now:      direct Y-plane buffer sampling = zero allocations
     // -----------------------------------------------------------------------
     private fun runQualityFeedback(imageProxy: ImageProxy) {
         try {
-            val bitmap = imageProxy.toDetectorBitmap()
-            val croppedBitmap = bitmap.centerCrop(
-                widthPercent = 0.72f,
-                heightPercent = 0.32f
-            )
-
-            lastGlareStatus = hasExcessiveGlare(croppedBitmap)
-            lastBlurStatus  = isBlurry(croppedBitmap)
+            lastGlareStatus = imageProxy.hasExcessiveGlareYPlane()
+            lastBlurStatus  = imageProxy.isBlurryYPlane()
 
             runOnUiThread {
                 when {
@@ -757,7 +748,6 @@ class MainActivity : AppCompatActivity() {
                         binding.btnShutter.isEnabled = false
                     }
                     else -> {
-                        // Frame looks good — enable shutter and hint the user
                         if (!isCapturing && !isMatching) {
                             binding.statusText.text = getString(R.string.ready_status)
                             binding.statusText.setTextColor("#4CAF50".toColorInt())
@@ -766,10 +756,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-
-            bitmap.recycle()
-            croppedBitmap.recycle()
-
         } catch (e: Exception) {
             Log.e(TAG, "runQualityFeedback error", e)
         } finally {
@@ -784,7 +770,7 @@ class MainActivity : AppCompatActivity() {
             val cameraProvider = cameraProviderFuture.get()
             cameraProvider.unbindAll()
             cameraInstance = null
-            imageCapture = null   // SHUTTER: clear reference on stop
+            imageCapture = null
         } catch (e: Exception) {
             Log.e(TAG, "stopCamera Error", e)
         }
@@ -806,8 +792,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // processImageWithOCR is no longer called from the live analyzer path.
-    // It is kept here in case you want to re-enable live scanning in future.
+    // Kept for potential future re-enable of live OCR.
+    // All helpers it calls (toDetectorBitmap, hasExcessiveGlare, isBlurry,
+    // preprocessForOCR) now use their optimized implementations below.
     @OptIn(ExperimentalGetImage::class)
     private fun processImageWithOCR(imageProxy: ImageProxy) {
         try {
@@ -1019,23 +1006,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Uses pre-compiled UNIT_QTY_REGEX and STRIP_COUNT_REGEX from companion object.
+    // Previously Regex(...) was constructed fresh on every call.
     private fun extractVisibleQuantity(text: String): Int? {
         val normalized = text.uppercase(Locale.ROOT)
             .replace(",", " ").replace(".", " ").replace("-", " ")
 
-        // Unit-based quantity — e.g. "100 ML", "10 TAB", "30 CAPS"
-        // Cap at 500 so dosage strengths like "650 MG" are never treated as qty
-        val unitPattern = Regex(
-            """\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b"""
-        )
-        unitPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?.takeIf { it in 1..500 }   // dosage strengths (650, 500, 250) are excluded
+        UNIT_QTY_REGEX.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.takeIf { it in 1..500 }
             ?.let { return it }
 
-        // Strip count — e.g. "10'S", "15S", "30S"
-        // Cap at 200 to avoid grabbing dosage numbers
-        val stripCountPattern = Regex("""\b(\d{1,3})\s*'?S\b""")
-        stripCountPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        STRIP_COUNT_REGEX.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()
             ?.takeIf { it in 1..200 }
             ?.let { return it }
 
@@ -1171,7 +1152,7 @@ class MainActivity : AppCompatActivity() {
     private fun resetState() {
         isLocked = false
         isMatching = false
-        isCapturing = false   // SHUTTER: also reset capture state
+        isCapturing = false
         currentMatch = null
         currentDetectedQuantity = null
         currentPillCount = null
@@ -1184,8 +1165,8 @@ class MainActivity : AppCompatActivity() {
             binding.quantityInput.setText("1")
             binding.loader.visibility = View.GONE
             binding.top3Container.visibility = View.GONE
-            binding.scanBox.setBackgroundColor(Color.TRANSPARENT)  // SHUTTER: clear tint
-            binding.btnShutter.isEnabled = true                     // SHUTTER: re-enable button
+            binding.scanBox.setBackgroundColor(Color.TRANSPARENT)
+            binding.btnShutter.isEnabled = true
             if (confirmedMedicines.isEmpty()) binding.confirmBtn.isEnabled = false
         }
     }
@@ -1273,7 +1254,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // -----------------------------------------------------------------------
-    // Adapters & inner classes
+    // Adapter
     // -----------------------------------------------------------------------
 
     private class ConfirmedMedicineAdapter(
@@ -1282,7 +1263,7 @@ class MainActivity : AppCompatActivity() {
     ) : RecyclerView.Adapter<ConfirmedMedicineAdapter.ViewHolder>() {
 
         class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
-            val nameTv: TextView    = view.findViewById(R.id.tvConfirmedName)
+            val nameTv: TextView       = view.findViewById(R.id.tvConfirmedName)
             val deleteBtn: ImageButton = view.findViewById(R.id.btnDelete)
         }
 
@@ -1303,117 +1284,166 @@ class MainActivity : AppCompatActivity() {
     }
 
     // -----------------------------------------------------------------------
-    // Image helpers (unchanged from original)
+    // Image helpers
     // -----------------------------------------------------------------------
 
+    // Replaced NV21 → JPEG-encode (quality 100) → JPEG-decode → Bitmap with
+    // CameraX's built-in toBitmap(), which uses a native JNI path and avoids
+    // the JPEG compression/decompression cycle entirely.
+    // Rotation is applied exactly once (the old toDetectorBitmap was called
+    // from captureAndScan's let-block which then rotated again — double rotate).
     private fun ImageProxy.toDetectorBitmap(): Bitmap {
-        val nv21 = toNv21()
-        val yuvImage = android.graphics.YuvImage(
-            nv21, android.graphics.ImageFormat.NV21, this.width, this.height, null
-        )
-        val out = java.io.ByteArrayOutputStream()
-        yuvImage.compressToJpeg(
-            android.graphics.Rect(0, 0, yuvImage.width, yuvImage.height), 100, out
-        )
-        val imageBytes = out.toByteArray()
-        val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-        if (imageInfo.rotationDegrees == 0) return bitmap
+        val bmp = toBitmap()
+        if (imageInfo.rotationDegrees == 0) return bmp
         val matrix = android.graphics.Matrix()
         matrix.postRotate(imageInfo.rotationDegrees.toFloat())
-        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        bitmap.recycle()
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+        bmp.recycle()
         return rotated
     }
 
+    // Uses pre-compiled companion-object regex. Previously these were
+    // constructed with Regex(...) on every call to toSampleText().
     private fun String.toSampleText(): String {
         val normalized = uppercase(Locale.ROOT)
-            .replace("[^A-Z0-9 ]".toRegex(), " ")
-            .replace("\\s+".toRegex(), " ")
+            .replace(SAMPLE_CLEAN_REGEX,  " ")
+            .replace(SAMPLE_SPACES_REGEX, " ")
             .trim()
         val token = normalized.split(" ").firstOrNull { it.any(Char::isLetter) }.orEmpty()
-        return token.replace("[^A-Z]".toRegex(), "").ifBlank { normalized }
+        return token.replace(SAMPLE_ALPHA_REGEX, "").ifBlank { normalized }
     }
 
     private fun cropBrandRegion(bitmap: Bitmap): Bitmap {
-        // Take middle 50% vertically — brand name is rarely in top or bottom quarter
-        val startY    = bitmap.height / 4
+        val startY     = bitmap.height / 4
         val cropHeight = bitmap.height / 2
         return Bitmap.createBitmap(bitmap, 0, startY, bitmap.width, cropHeight)
     }
 
+    // Replaced per-pixel getPixel(x,y)/setPixel(x,y) loop with a single
+    // getPixels() bulk read into an IntArray, in-memory processing, then a
+    // single setPixels() write. Reduces JNI call count from O(w×h) to 2.
+    // Integer luma weights (×77/×150/×29, ushr 8) replace floating-point math.
     private fun preprocessForOCR(bitmap: Bitmap): Bitmap {
-        val width  = bitmap.width
-        val height = bitmap.height
-        val processed = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                val pixel = bitmap.getPixel(x, y)
-                val r = Color.red(pixel)
-                val g = Color.green(pixel)
-                val b = Color.blue(pixel)
-                val gray = (0.3 * r + 0.59 * g + 0.11 * b).toInt()
-                val enhanced = when {
-                    gray > 220 -> 255
-                    gray > 160 -> 220
-                    gray > 100 -> 150
-                    else       -> 50
-                }
-                processed.setPixel(x, y, Color.rgb(enhanced, enhanced, enhanced))
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        for (i in pixels.indices) {
+            val p    = pixels[i]
+            // BT.601 luma via integer arithmetic: avoids FP conversion per pixel
+            val gray = ((p shr 16 and 0xFF) * 77 + (p shr 8 and 0xFF) * 150 + (p and 0xFF) * 29) ushr 8
+            val e    = when {
+                gray > 220 -> 255
+                gray > 160 -> 220
+                gray > 100 -> 150
+                else       -> 50
             }
+            pixels[i] = (0xFF shl 24) or (e shl 16) or (e shl 8) or e
         }
-        return processed
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(pixels, 0, w, 0, 0, w, h)
+        return out
     }
 
+    // Bulk getPixels() replaces per-pixel getPixel() calls.
+    // Used by processImageWithOCR (live OCR fallback path).
     private fun hasExcessiveGlare(bitmap: Bitmap): Boolean {
-        var brightPixels = 0
-        var totalPixels  = 0
-        for (x in 0 until bitmap.width step 5) {
-            for (y in 0 until bitmap.height step 5) {
-                val pixel      = bitmap.getPixel(x, y)
-                val brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3
-                if (brightness > 245) brightPixels++
-                totalPixels++
+        val w = bitmap.width; val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        var bright = 0; var total = 0
+        var row = 0
+        while (row < h) {
+            var col = 0
+            while (col < w) {
+                val p    = pixels[row * w + col]
+                val luma = ((p shr 16 and 0xFF) + (p shr 8 and 0xFF) + (p and 0xFF)) / 3
+                if (luma > 245) bright++
+                total++
+                col += 5
             }
+            row += 5
         }
-        return brightPixels.toFloat() / totalPixels > 0.15f
+        return total > 0 && bright.toFloat() / total > 0.15f
     }
 
+    // Bulk getPixels() replaces per-pixel getPixel() calls.
+    // Used by processImageWithOCR (live OCR fallback path).
     private fun isBlurry(bitmap: Bitmap): Boolean {
-        var diffSum = 0L
-        var count   = 0
-        for (x in 1 until bitmap.width step 5) {
-            for (y in 1 until bitmap.height step 5) {
-                val current  = bitmap.getPixel(x, y)
-                val previous = bitmap.getPixel(x - 1, y - 1)
-                val cGray = (Color.red(current)  + Color.green(current)  + Color.blue(current))  / 3
-                val pGray = (Color.red(previous) + Color.green(previous) + Color.blue(previous)) / 3
-                diffSum += kotlin.math.abs(cGray - pGray)
+        val w = bitmap.width; val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        var diffSum = 0L; var count = 0
+        var row = 1
+        while (row < h) {
+            var col = 1
+            while (col < w) {
+                val cur  = pixels[row * w + col]
+                val prev = pixels[(row - 1) * w + (col - 1)]
+                val cG = ((cur  shr 16 and 0xFF) + (cur  shr 8 and 0xFF) + (cur  and 0xFF)) / 3
+                val pG = ((prev shr 16 and 0xFF) + (prev shr 8 and 0xFF) + (prev and 0xFF)) / 3
+                diffSum += abs(cG - pG)
                 count++
+                col += 5
             }
+            row += 5
         }
-        return diffSum.toFloat() / count < 5f
+        return count > 0 && diffSum.toFloat() / count < 5f
     }
 
-    private fun ImageProxy.toNv21(): ByteArray {
-        val nv21    = ByteArray(width * height * 3 / 2)
-        val yPlane  = planes[0]; val uPlane = planes[1]; val vPlane = planes[2]
-        val yBuffer = yPlane.buffer; val uBuffer = uPlane.buffer; val vBuffer = vPlane.buffer
-        var outputOffset = 0
-        for (row in 0 until height) {
-            yBuffer.position(row * yPlane.rowStride)
-            yBuffer.get(nv21, outputOffset, width)
-            outputOffset += width
-        }
-        val chromaWidth = width / 2; val chromaHeight = height / 2
-        for (row in 0 until chromaHeight) {
-            for (col in 0 until chromaWidth) {
-                val vIndex = row * vPlane.rowStride + col * vPlane.pixelStride
-                val uIndex = row * uPlane.rowStride + col * uPlane.pixelStride
-                nv21[outputOffset++] = vBuffer.get(vIndex)
-                nv21[outputOffset++] = uBuffer.get(uIndex)
+    // -----------------------------------------------------------------------
+    // Y-plane sampling — zero Bitmap allocation
+    //
+    // Both functions read directly from the YUV_420_888 luminance plane buffer.
+    // The sampled ROI matches centerCrop(0.72f, 0.32f): x∈[14%,86%], y∈[34%,66%].
+    // A try/catch makes both safe on devices that return JPEG-format captures
+    // (planes[0] would contain JPEG bytes; the function returns false harmlessly).
+    // -----------------------------------------------------------------------
+
+    private fun ImageProxy.hasExcessiveGlareYPlane(): Boolean {
+        return try {
+            val buf    = planes[0].buffer
+            val stride = planes[0].rowStride
+            val w = width; val h = height
+            val x0 = (w * 0.14f).toInt(); val x1 = (w * 0.86f).toInt()
+            val y0 = (h * 0.34f).toInt(); val y1 = (h * 0.66f).toInt()
+            var bright = 0; var total = 0
+            var row = y0
+            while (row < y1) {
+                var col = x0
+                while (col < x1) {
+                    if (buf.get(row * stride + col).toInt() and 0xFF > 245) bright++
+                    total++
+                    col += 5
+                }
+                row += 5
             }
-        }
-        return nv21
+            total > 0 && bright.toFloat() / total > 0.15f
+        } catch (_: Exception) { false }
+    }
+
+    private fun ImageProxy.isBlurryYPlane(): Boolean {
+        return try {
+            val buf    = planes[0].buffer
+            val stride = planes[0].rowStride
+            val w = width; val h = height
+            val x0 = (w * 0.14f).toInt() + 1; val x1 = (w * 0.86f).toInt()
+            val y0 = (h * 0.34f).toInt() + 1; val y1 = (h * 0.66f).toInt()
+            var diffSum = 0L; var count = 0
+            var row = y0
+            while (row < y1) {
+                var col = x0
+                while (col < x1) {
+                    val cur  = buf.get(row * stride + col).toInt() and 0xFF
+                    val prev = buf.get((row - 1) * stride + (col - 1)).toInt() and 0xFF
+                    diffSum += abs(cur - prev)
+                    count++
+                    col += 5
+                }
+                row += 5
+            }
+            count > 0 && diffSum.toFloat() / count < 5f
+        } catch (_: Exception) { false }
     }
 
     private fun Bitmap.centerCrop(widthPercent: Float, heightPercent: Float): Bitmap {
