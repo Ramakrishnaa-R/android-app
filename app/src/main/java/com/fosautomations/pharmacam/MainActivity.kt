@@ -295,14 +295,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         Log.d(TAG, "SHUTTER: capture success")
 
-                        // ADD this instead:
-                        val bitmap = imageProxy.toBitmap().let { bmp ->
-                            val matrix = android.graphics.Matrix()
-                            matrix.postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
-                            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-                            bmp.recycle()
-                            rotated
-                        }
+                        val bitmap = imageProxy.toDetectorBitmap()
 
                         val croppedBitmap = bitmap.centerCrop(
                             widthPercent = 0.72f,
@@ -1023,13 +1016,21 @@ class MainActivity : AppCompatActivity() {
         val normalized = text.uppercase(Locale.ROOT)
             .replace(",", " ").replace(".", " ").replace("-", " ")
 
+        // Unit-based quantity — e.g. "100 ML", "10 TAB", "30 CAPS"
+        // Cap at 500 so dosage strengths like "650 MG" are never treated as qty
         val unitPattern = Regex(
             """\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b"""
         )
-        unitPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        unitPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.takeIf { it in 1..500 }   // dosage strengths (650, 500, 250) are excluded
+            ?.let { return it }
 
+        // Strip count — e.g. "10'S", "15S", "30S"
+        // Cap at 200 to avoid grabbing dosage numbers
         val stripCountPattern = Regex("""\b(\d{1,3})\s*'?S\b""")
-        stripCountPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        stripCountPattern.find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?.takeIf { it in 1..200 }
+            ?.let { return it }
 
         return null
     }
