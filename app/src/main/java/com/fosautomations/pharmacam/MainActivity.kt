@@ -295,7 +295,14 @@ class MainActivity : AppCompatActivity() {
                     try {
                         Log.d(TAG, "SHUTTER: capture success")
 
-                        val bitmap = imageProxy.toDetectorBitmap()
+                        // ADD this instead:
+                        val bitmap = imageProxy.toBitmap().let { bmp ->
+                            val matrix = android.graphics.Matrix()
+                            matrix.postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
+                            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                            bmp.recycle()
+                            rotated
+                        }
 
                         val croppedBitmap = bitmap.centerCrop(
                             widthPercent = 0.72f,
