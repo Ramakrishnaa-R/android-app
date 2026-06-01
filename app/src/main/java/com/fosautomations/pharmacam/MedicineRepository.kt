@@ -12,6 +12,7 @@ import java.util.*
 object MedicineRepository {
     private val database = mutableListOf<Medicine>()
     private val invertedIndex = mutableMapOf<String, MutableSet<Medicine>>()
+    private val categoryIndex = mutableMapOf<ProductCategory, MutableList<Medicine>>()
     private var isLoaded = false
 
     private val NOISE = setOf(
@@ -19,9 +20,26 @@ object MedicineRepository {
         "DATE", "MRP", "EXTERNAL", "TREATMENT", "INFECTION", "THE"
     )
 
-    fun getDatabase(): List<Medicine> = database
+    fun getDatabase(): List<Medicine> = synchronized(database) { database.toList() }
 
-    fun getIndex(): Map<String, Set<Medicine>> = invertedIndex
+    fun getIndex(): Map<String, Set<Medicine>> = synchronized(invertedIndex) { invertedIndex.toMap() }
+
+    fun getByCategory(category: ProductCategory): List<Medicine> = synchronized(categoryIndex) { categoryIndex[category]?.toList().orEmpty() }
+
+    /** Medicines for matcher when a package category is predicted (includes related forms, e.g. Tonic + Suspension). */
+    fun getByCategoryFilter(filter: ProductCategory): List<Medicine> = synchronized(database) {
+        val categories = ProductCategoryClassifier.matchingCategories(filter)
+        if (categories.size >= ProductCategory.entries.size) return database.toList()
+        val seen = LinkedHashSet<Medicine>()
+        categories.forEach { category ->
+            categoryIndex[category]?.let { seen.addAll(it) }
+        }
+        seen.toList()
+    }
+
+    fun getCategoryCounts(): Map<ProductCategory, Int> = synchronized(categoryIndex) {
+        ProductCategory.entries.associateWith { categoryIndex[it]?.size ?: 0 }
+    }
 
     suspend fun loadIfNeeded(context: Context) {
         if (isLoaded) return
@@ -37,6 +55,7 @@ object MedicineRepository {
                 val jsonArray = JSONArray(jsonString)
                 parseJsonArray(jsonArray)
                 isLoaded = true
+                logCategoryIndexStats()
                 Log.d("PharmaCam", "Database loaded: ${database.size} items")
             } catch (e: Exception) {
                 Log.e("PharmaCam", "Error loading database", e)
@@ -47,6 +66,7 @@ object MedicineRepository {
     private fun parseJsonArray(jsonArray: JSONArray) {
         database.clear()
         invertedIndex.clear()
+        categoryIndex.clear()
         
         for (i in 0 until jsonArray.length()) {
             val medicine = when (val item = jsonArray.get(i)) {
@@ -61,8 +81,13 @@ object MedicineRepository {
         }
     }
 
-    private fun addInternal(medicine: Medicine) {
+    private fun addInternal(medicine: Medicine) = synchronized(database) {
         database.add(medicine)
+        val category = ProductCategoryClassifier.classify(
+            medicine.name,
+            ClassificationSource.DATABASE
+        )
+        categoryIndex.getOrPut(category) { mutableListOf() }.add(medicine)
         tokenize(medicine.name).forEach { word ->
             if (word.length >= 3 && (word !in NOISE)) {
                 invertedIndex.getOrPut(word) { mutableSetOf() }.add(medicine)
@@ -107,15 +132,33 @@ object MedicineRepository {
         }
     }
 
-    private fun rebuildIndex() {
+    private fun rebuildIndex() = synchronized(database) {
         invertedIndex.clear()
+        categoryIndex.clear()
         database.forEach { med ->
+            categoryIndex.getOrPut(
+                ProductCategoryClassifier.classify(med.name, ClassificationSource.DATABASE)
+            ) { mutableListOf() }.add(med)
             tokenize(med.name).forEach { word ->
                 if (word.length >= 3 && (word !in NOISE)) {
                     invertedIndex.getOrPut(word) { mutableSetOf() }.add(med)
                 }
             }
         }
+    }
+
+    private fun logCategoryIndexStats() {
+        val counts = getCategoryCounts()
+        val pill = counts[ProductCategory.PILL] ?: 0
+        val other = counts[ProductCategory.OTHER] ?: 0
+        val total = database.size.coerceAtLeast(1)
+        val summary = ProductCategory.entries
+            .sortedByDescending { counts[it] ?: 0 }
+            .joinToString { "${it.name}=${counts[it] ?: 0}" }
+        Log.i(
+            "PharmaCam",
+            "Category index built: PILL=$pill (${pill * 100 / total}%), OTHER=$other (${other * 100 / total}%), all=[$summary]"
+        )
     }
 
     private fun save(context: Context) {

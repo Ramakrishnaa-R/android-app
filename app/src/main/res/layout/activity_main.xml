@@ -45,12 +45,26 @@
 
         <EditText
             android:id="@+id/ipInput"
-            android:layout_width="110dp"
+            android:layout_width="100dp"
             android:layout_height="wrap_content"
             android:background="@android:drawable/edit_text"
             android:hint="IP Address"
             android:importantForAutofill="no"
             android:inputType="text"
+            android:padding="8dp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#666666"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/portInput"
+            android:layout_width="64dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:background="@android:drawable/edit_text"
+            android:hint="Port"
+            android:importantForAutofill="no"
+            android:inputType="number"
             android:padding="8dp"
             android:textColor="#FFFFFF"
             android:textColorHint="#666666"
@@ -151,7 +165,7 @@
             android:orientation="vertical"
             android:padding="20dp">
 
-            <TextView
+            <EditText
                 android:id="@+id/resultTextView"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -160,7 +174,10 @@
                 android:text="READY TO SCAN"
                 android:textColor="#E0E0E0"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:background="@null"
+                android:inputType="textMultiLine"
+                android:importantForAutofill="no" />
 
             <!-- Suggestions Area -->
             <LinearLayout
