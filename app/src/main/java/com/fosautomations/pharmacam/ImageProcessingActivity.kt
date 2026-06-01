@@ -28,6 +28,10 @@ class ImageProcessingActivity : AppCompatActivity() {
             return
         }
 
+        findViewById<android.widget.Button>(R.id.btnClose).setOnClickListener {
+            finish()
+        }
+
         scope.launch {
             runPipeline(bitmap)
         }
@@ -80,12 +84,16 @@ class ImageProcessingActivity : AppCompatActivity() {
                 android.util.Log.d("IMAGE_PROCESSING", "OCR TEXT: $fullText")
 
                 if (fullText.length >= 3) {
-                    // Pass result back to MainActivity
                     MainActivity.pendingOcrResult = fullText
-                    finish() // close this activity, MainActivity resumes
+                    // REMOVE the finish() that was here
+                    runOnUiThread {
+                        showmessage("✅ OCR Done — tap Close to continue")
+                        findViewById<android.widget.Button>(R.id.btnClose).visibility = View.VISIBLE
+                    }
                 } else {
                     runOnUiThread {
                         showmessage("Nothing readable — move closer")
+                        findViewById<android.widget.Button>(R.id.btnClose).visibility = View.VISIBLE
                     }
                 }
             }

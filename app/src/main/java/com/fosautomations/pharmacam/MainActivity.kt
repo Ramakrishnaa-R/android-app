@@ -335,10 +335,10 @@ class MainActivity : AppCompatActivity() {
 
                         // --- Crop ---
                         val ocrBitmap = run {
-                            val left   = (bitmap.width  * 0.03f).toInt()
-                            val top    = (bitmap.height * 0.05f).toInt()
-                            val width  = (bitmap.width  * 0.94f).toInt().coerceAtLeast(1)
-                            val height = (bitmap.height * 0.90f).toInt().coerceAtLeast(1)
+                            val left   = (bitmap.width  * 0.05f).toInt()
+                            val top    = (bitmap.height * 0.25f).toInt()
+                            val width  = (bitmap.width  * 0.90f).toInt().coerceAtLeast(1)
+                            val height = (bitmap.height * 0.45f).toInt().coerceAtLeast(1)  // was 0.90
                             Bitmap.createBitmap(bitmap, left, top, width, height)
                         }
                         bitmap.recycle()
@@ -695,6 +695,11 @@ class MainActivity : AppCompatActivity() {
             lastBlurStatus  = imageProxy.isBlurryYPlane()
 
             runOnUiThread {
+                // Don't overwrite anything if we have a match or suggestions showing
+                if (currentMatch != null || binding.top3Container.visibility == View.VISIBLE) {
+                    return@runOnUiThread
+                }
+
                 when {
                     lastGlareStatus -> {
                         binding.statusText.text = "Too much glare - tilt strip"
@@ -707,12 +712,7 @@ class MainActivity : AppCompatActivity() {
                         binding.btnShutter.isEnabled = false
                     }
                     else -> {
-                        // PERFORMANCE FIX:
-                        // Only trigger autofocus once when transitioning
-                        // from disabled -> enabled state
-
                         val wasDisabled = !binding.btnShutter.isEnabled
-
                         if (!isCapturing && !isMatching) {
                             binding.statusText.text = getString(R.string.ready_status)
                             binding.statusText.setTextColor("#4CAF50".toColorInt())
@@ -905,7 +905,6 @@ class MainActivity : AppCompatActivity() {
                 if (matches.isEmpty()) {
                     Log.e("MATCHER_DEBUG", "NO MATCHES FOUND!")
                     binding.statusText.text = "No match for: $text"
-                    Toast.makeText(this@MainActivity, "No matches - try again", Toast.LENGTH_LONG).show()
                 } else {
                     Log.d("MATCHER_DEBUG", "Showing ${matches.size} suggestions")
                     showSuggestionsUI(text, matches)

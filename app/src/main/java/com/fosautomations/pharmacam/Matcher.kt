@@ -41,6 +41,9 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "MOXIKIND"   to listOf("AMOXICILLIN", "AMOXYCILLIN", "CLAVULANATE"),
     "AZEE"       to listOf("AZITHROMYCIN"),
     "AZITHRAL"   to listOf("AZITHROMYCIN"),
+    "RAZO"   to listOf("RABEPRAZOLE", "ROZO"),
+    "RABELOC" to listOf("RABEPRAZOLE"),
+    "RABLET"  to listOf("RABEPRAZOLE"),
 )
 
 private val OCR_WORD_CORRECTIONS = mapOf(
@@ -580,9 +583,9 @@ object Matcher {
 
     private fun tokenize(text: String): List<String> =
         text.uppercase(Locale.ROOT).split(" ")
-            .map { it.trim() }
+            .map { it.trim().trimStart(')', '(', '-', '.', ',', '*', '}', '{') }  // ← add this
             .filter { token ->
-                token.length >= 4 &&
+                token.length >= 3 &&   // ← changed from 4 to 3
                         token !in STOPWORDS &&
                         !token.all { it.isDigit() }
             }
