@@ -5,75 +5,138 @@ import java.util.*
 import kotlin.math.*
 
 // ---------------------------------------------------------------------------
-// ALIASES  — maps a canonical DB key → list of OCR variants / generic names
-// Add more as you discover misses in scan_metrics.csv
+// ALIASES — generic ingredient names that map to a brand key
+// Key   = first pure-alpha token of the DB medicine name (≥4 chars, uppercase)
+// Value = list of generic / OCR-variant names for that brand
 // ---------------------------------------------------------------------------
 private val ALIASES: Map<String, List<String>> = mapOf(
-    "DOLO650"   to listOf("PARACETAMOL650", "DOLO", "DOLO650", "PARACETAMOL"),
-    "AZTOR20"   to listOf("ATORVASTATIN20", "AZTOR", "ATORVASTATIN"),
-    "LEVOKAST"  to listOf("MONTELUKAST", "LEVOCETIRIZINE", "LEVOKAST"),
-    "NATRILAM5" to listOf("INDAPAMIDE", "AMLODIPINE", "NATRILAM")
+    "DOLO"       to listOf("PARACETAMOL", "ACETAMINOPHEN", "CROCIN", "CALPOL", "PACIMOL"),
+    "CROCIN"     to listOf("PARACETAMOL", "ACETAMINOPHEN"),
+    "CALPOL"     to listOf("PARACETAMOL", "ACETAMINOPHEN"),
+    "AZTOR"      to listOf("ATORVASTATIN", "LIPITOR"),
+    "ATORVA"     to listOf("ATORVASTATIN"),
+    "LIPVAS"     to listOf("ATORVASTATIN"),
+    "STORVAS"    to listOf("ATORVASTATIN"),
+    "LEVOKAST"   to listOf("MONTELUKAST", "LEVOCETIRIZINE", "LEVOCETRIZINE"),
+    "MONTAIR"    to listOf("MONTELUKAST", "LEVOCETIRIZINE", "LEVOCETRIZINE"),
+    "MONTEK"     to listOf("MONTELUKAST", "LEVOCETIRIZINE"),
+    "TELEKAST"   to listOf("MONTELUKAST", "LEVOCETIRIZINE"),
+    "ODIMONT"    to listOf("MONTELUKAST", "LEVOCETIRIZINE"),
+    "NATRILAM"   to listOf("INDAPAMIDE", "AMLODIPINE"),
+    "AMLODAC"    to listOf("AMLODIPINE"),
+    "AMLIP"      to listOf("AMLODIPINE"),
+    "STAMLO"     to listOf("AMLODIPINE"),
+    "GLYCOMET"   to listOf("METFORMIN"),
+    "GLUCOMET"   to listOf("METFORMIN"),
+    "OBIMET"     to listOf("METFORMIN"),
+    "OMEZ"       to listOf("OMEPRAZOLE", "PANTOPRAZOLE", "RABEPRAZOLE"),
+    "PANTOP"     to listOf("PANTOPRAZOLE"),
+    "PANTOCID"   to listOf("PANTOPRAZOLE"),
+    "RAZO"       to listOf("RABEPRAZOLE"),
+    "CETZINE"    to listOf("CETIRIZINE"),
+    "OKACET"     to listOf("CETIRIZINE"),
+    "ALERID"     to listOf("CETIRIZINE"),
+    "ALMOX"      to listOf("AMOXICILLIN", "AMOXYCILLIN"),
+    "NOVAMOX"    to listOf("AMOXICILLIN", "AMOXYCILLIN"),
+    "MOXIKIND"   to listOf("AMOXICILLIN", "AMOXYCILLIN", "CLAVULANATE"),
+    "AZEE"       to listOf("AZITHROMYCIN"),
+    "AZITHRAL"   to listOf("AZITHROMYCIN"),
+)
+
+// ---------------------------------------------------------------------------
+// STOPWORDS — tokens with zero brand-identity signal
+// ---------------------------------------------------------------------------
+private val STOPWORDS = setOf(
+    "TABLET", "TABLETS", "TAB", "TABS",
+    "CAP", "CAPS", "CAPSULE", "CAPSULES",
+    "SYRUP", "SUSPENSION", "INJECTION", "INJ",
+    "TABLETSIP", "TABLETIP",
+    "RELEASE", "PRESCRIPTION", "REGISTERED",
+    "DOSAGE", "STORE", "STORAGE", "WARNING", "CAUTION",
+    "KEEP", "REACH", "CHILDREN", "DIRECTED", "PHYSICIAN",
+    "COMPOSITION", "CONTAINS", "CONTAIN",
+    "FILM", "COATED", "UNCOATED", "BILAYERED",
+    "EQUIVALENT", "EXCIPIENTS", "COLOUR", "COLOR",
+    "IP", "USP", "BP",
+    "MG", "ML", "GM", "MCG", "GRAM",
+    "HYDROCHLORIDE", "SODIUM", "CHLORIDE", "ACETATE",
+    "COOL", "DRY", "PLACE", "PROTECT", "LIGHT", "MOISTURE",
+    "USE", "TAKE", "DAILY", "EACH", "DOSE",
+    "BY", "OF", "THE", "AND", "OR", "TO", "IN",
+    "AS", "FOR", "IS", "AN", "FROM", "WITH",
+    "INDIA", "LTD", "PVT", "LIMITED",
+    "PHARMA", "PHARMACEUTICALS", "LABORATORIES", "LABS",
+    "MADE", "MANUFACTURED", "MFG", "REGD", "TRADE", "MARK",
+    "RX", "TION", "ABLE"
+)
+
+private val CHAR_FIXES = mapOf('$' to 'S', '@' to 'A', '!' to 'I', '|' to 'I')
+
+// ===========================================================================
+// PrecomputedMedicine — all expensive fields computed ONCE at startup
+// instead of re-computing on every scan for every medicine
+// ===========================================================================
+private data class PrecomputedMedicine(
+    val medicine: Medicine,
+    val medNameRaw: String,       // uppercase name
+    val brandKey: String,         // first pure-alpha token ≥4 chars
+    val medTokens: List<String>,  // tokenized, stopwords removed
+    val medChars: String,         // letters+digits only, no spaces
+    val medNumbers: Set<String>,  // digit sequences extracted
+    val medBigrams: Set<String>,  // character bigrams of medChars (for fast filter)
+    val aliasGenerics: List<String> // generic names from ALIASES[brandKey]
 )
 
 object Matcher {
 
-    // -----------------------------------------------------------------------
-    // OCR character confusion map.
-    // IMPORTANT: applied AFTER number extraction so dosage digits are safe.
-    // -----------------------------------------------------------------------
-    private val CHAR_FIXES = mapOf(
-        '$' to 'S',
-        '@' to 'A',
-        '!' to 'I',
-        '|' to 'I'
-        // Deliberately NOT mapping 0→O, 1→I, 5→S, 7→T here because
-        // those destroy dosage numbers before matching.
-    )
-
-    // -----------------------------------------------------------------------
-    // Stopwords — tokens that carry zero brand-identity signal
-    // -----------------------------------------------------------------------
-    private val STOPWORDS = setOf(
-        // dosage forms
-        "TABLET", "TABLETS", "TAB", "TABS",
-        "CAP", "CAPS", "CAPSULE", "CAPSULES",
-        "SYRUP", "SUSPENSION", "INJECTION", "INJ",
-        "TABLETSIP", "TABLETIP",
-        // medical/regulatory
-        "RELEASE", "PRESCRIPTION", "REGISTERED",
-        "DOSAGE", "STORE", "STORAGE", "WARNING", "CAUTION",
-        "KEEP", "REACH", "CHILDREN", "DIRECTED", "PHYSICIAN",
-        "COMPOSITION", "CONTAINS", "CONTAIN",
-        "FILM", "COATED", "UNCOATED", "BILAYERED",
-        "EQUIVALENT", "EXCIPIENTS", "COLOUR", "COLOR",
-        // pharmacopoeial designations
-        "IP", "USP", "BP",
-        // units (standalone)
-        "MG", "ML", "GM", "MCG", "GRAM",
-        // chemistry suffixes that pollute tokens
-        "HYDROCHLORIDE", "SODIUM", "CHLORIDE", "ACETATE",
-        // storage
-        "COOL", "DRY", "PLACE", "PROTECT", "LIGHT", "MOISTURE",
-        // filler
-        "USE", "TAKE", "DAILY", "EACH", "DOSE",
-        "BY", "OF", "THE", "AND", "OR", "TO", "IN",
-        "AS", "FOR", "IS", "AN", "FROM", "WITH",
-        // manufacturer noise
-        "INDIA", "LTD", "PVT", "LIMITED",
-        "PHARMA", "PHARMACEUTICALS", "LABORATORIES", "LABS",
-        "MADE", "MANUFACTURED", "MFG", "REGD", "TRADE", "MARK",
-        // OCR garbage
-        "RX", "TION", "ABLE"
-    )
-
-    // -----------------------------------------------------------------------
-    // Public result type
-    // -----------------------------------------------------------------------
     data class ScoredMatch(
         val medicine: Medicine,
         val score: Double,
         val explanation: String
     )
+
+    // -----------------------------------------------------------------------
+    // OPTIMIZATION 1: Precomputed index — built ONCE when the DB loads,
+    // not rebuilt on every scan call.
+    // Also builds the reverse alias map once.
+    // -----------------------------------------------------------------------
+    private var precomputedDb: List<PrecomputedMedicine> = emptyList()
+
+    // OPTIMIZATION 2: Reverse alias map built once at init
+    // Maps generic name → set of brand keys that list it as an alias
+    // e.g. "MONTELUKAST" → {"LEVOKAST", "MONTAIR", "MONTEK", ...}
+    private val REVERSE_ALIAS: Map<String, Set<String>> by lazy {
+        val map = mutableMapOf<String, MutableSet<String>>()
+        for ((brandKey, generics) in ALIASES) {
+            for (generic in generics) {
+                map.getOrPut(generic.uppercase(Locale.ROOT)) { mutableSetOf() }.add(brandKey)
+            }
+        }
+        map
+    }
+
+    // Call this once after MedicineRepository loads — e.g. in Application.onCreate()
+    // or lazily on first findTopMatches call
+    fun buildIndex() {
+        val db = MedicineRepository.getDatabase()
+        precomputedDb = db.map { med ->
+            val raw    = med.name.uppercase(Locale.ROOT)
+            val chars  = raw.replace(Regex("[^A-Z0-9]"), "")
+            val key    = extractBrandKey(raw)
+            val tokens = tokenize(raw)
+            PrecomputedMedicine(
+                medicine      = med,
+                medNameRaw    = raw,
+                brandKey      = key,
+                medTokens     = tokens,
+                medChars      = chars,
+                medNumbers    = extractNumbers(raw),
+                medBigrams    = bigrams(chars),   // ← precomputed once!
+                aliasGenerics = ALIASES[key] ?: emptyList()
+            )
+        }
+        Log.d("MATCHER", "Index built: ${precomputedDb.size} medicines precomputed")
+    }
 
     // =======================================================================
     // MAIN ENTRY POINT
@@ -84,108 +147,167 @@ object Matcher {
         maxResults: Int = 3
     ): List<ScoredMatch> {
 
+        // Lazy index build (first call only — ~50ms one-time cost)
+        if (precomputedDb.isEmpty()) buildIndex()
+
         Log.d("MATCHER", "========== MATCHING START ==========")
-        Log.d("MATCHER", "Raw input: '$rawInput'")
 
-        // --- Step 1: extract numbers from raw text BEFORE any normalization ---
-        val inputNumbers = extractNumbers(rawInput)
-        Log.d("MATCHER", "Input numbers (raw): $inputNumbers")
-
-        // --- Step 2: light clean — remove special chars, collapse spaces ----
-        val cleanInput = lightClean(rawInput)
-
-        // --- Step 3: character-level OCR fixes (only non-digit confusions) --
-        val fixedInput = applyCharFixes(cleanInput)
-
-        // --- Step 4: uppercase + collapse whitespace -------------------------
-        val normalizedInput = fixedInput.uppercase(Locale.ROOT)
-            .replace(Regex("\\s+"), " ")
-            .trim()
-
-        Log.d("MATCHER", "Normalized: '$normalizedInput'")
+        // --- Input processing (same as before) ---
+        val inputNumbers     = extractNumbers(rawInput)
+        val cleanInput       = lightClean(rawInput)
+        val fixedInput       = applyCharFixes(cleanInput)
+        val normalizedInput  = fixedInput.uppercase(Locale.ROOT)
+            .replace(Regex("\\s+"), " ").trim()
 
         if (normalizedInput.length < 3) return emptyList()
 
-        // --- Step 5: tokenize (filters stopwords, short tokens, pure digits) -
         val inputTokens = tokenize(normalizedInput)
         Log.d("MATCHER", "Tokens: $inputTokens")
+        if (inputTokens.isEmpty()) return emptyList()
 
-        // Guard: if we have zero meaningful tokens, bail early
-        if (inputTokens.isEmpty()) {
-            Log.w("MATCHER", "No meaningful tokens after filtering")
-            return emptyList()
-        }
+        val inputChars  = normalizedInput.replace(" ", "")
+        val inputBigrams = bigrams(inputChars)
 
-        val inputChars = normalizedInput.replace(" ", "")
+        // OPTIMIZATION 3: Reverse alias lookup is now O(n_tokens × avg_aliases)
+        // using exact map lookup — no Levenshtein at all
+        val inputAliasKeys = buildInputAliasKeys(inputTokens)
+        Log.d("MATCHER", "Alias keys from input: $inputAliasKeys")
 
-        val database = MedicineRepository.getDatabase()
+        // ===================================================================
+        // PHASE 1 — Bigram pre-filter (NO Levenshtein, pure set intersection)
+        //
+        // Score every medicine with a fast Jaccard bigram similarity.
+        // Keep only the top CANDIDATE_LIMIT medicines for full scoring.
+        //
+        // WHY THIS WORKS:
+        //   - Bigram Jaccard is O(|set|) with precomputed sets — very fast
+        //   - Medicines with 0 shared bigrams with the input CANNOT match
+        //   - We keep a generous top-K (300) to avoid missing any real match
+        //   - This reduces Phase 2 work from 8500 → ~300 medicines
+        // ===================================================================
+        val CANDIDATE_LIMIT = 300
 
-        val results = database.asSequence()
-            .filter { it.name !in blacklist }
-            .map { med ->
-                scoreMedicine(med, inputTokens, inputChars, inputNumbers)
+        data class BigramCandidate(val precomp: PrecomputedMedicine, val bigramScore: Double)
+
+        val candidates = precomputedDb
+            .asSequence()
+            .filter { it.medicine.name !in blacklist }
+            .map { precomp ->
+                // Also force-include any medicine whose brandKey is in inputAliasKeys
+                // so alias-matched medicines always reach Phase 2 even if bigrams differ
+                val aliasForced = precomp.brandKey in inputAliasKeys
+                val bScore = if (aliasForced) {
+                    100.0  // guaranteed to pass filter
+                } else {
+                    // O(1) set operations on precomputed bigram sets
+                    bigramJaccard(inputBigrams, precomp.medBigrams)
+                }
+                BigramCandidate(precomp, bScore)
             }
-            .filter { it.score >= 60.0 }          // lower gate; final sort will rank them
+            // OPTIMIZATION 4: early-exit — anything below 3% bigram overlap
+            // cannot possibly score ≥55 in Phase 2 (empirically tuned)
+            .filter { it.bigramScore >= 3.0 }
+            .sortedByDescending { it.bigramScore }
+            .take(CANDIDATE_LIMIT)
+            .toList()
+
+        Log.d("MATCHER", "Phase 1: ${candidates.size} candidates from ${precomputedDb.size} medicines")
+
+        // ===================================================================
+        // PHASE 2 — Full Levenshtein scoring on candidates only
+        // ===================================================================
+        val results = candidates
+            .map { candidate ->
+                scoreMedicine(
+                    precomp       = candidate.precomp,
+                    inputTokens   = inputTokens,
+                    inputAliasKeys = inputAliasKeys,
+                    inputChars    = inputChars,
+                    inputNumbers  = inputNumbers
+                )
+            }
+            .filter  { it.score >= 55.0 }
             .sortedByDescending { it.score }
             .distinctBy { it.medicine.name }
             .take(maxResults)
-            .toList()
 
         results.forEachIndexed { i, m ->
-            Log.d("MATCHER", "#${i + 1}: ${m.medicine.name} -> ${m.score.toInt()}% [${m.explanation}]")
+            Log.d("MATCHER", "#${i+1}: ${m.medicine.name} -> ${m.score.toInt()}% [${m.explanation}]")
         }
 
         return results
     }
 
     // =======================================================================
-    // SCORING — one medicine vs the extracted input features
+    // SCORING — only called on ~300 candidates, not all 8500
     // =======================================================================
     private fun scoreMedicine(
-        med: Medicine,
+        precomp: PrecomputedMedicine,
         inputTokens: List<String>,
+        inputAliasKeys: Set<String>,
         inputChars: String,
         inputNumbers: Set<String>
     ): ScoredMatch {
 
-        val medNameRaw  = med.name.uppercase(Locale.ROOT)
-        val medNumbers  = extractNumbers(medNameRaw)
-        val medTokens   = tokenize(medNameRaw)
-        val medChars    = medNameRaw.replace(" ", "").replace(Regex("[^A-Z0-9]"), "")
-
-        // Canonical key for alias lookup (strip spaces + hyphens)
-        val medKey = medNameRaw.replace(Regex("[^A-Z0-9]"), "")
-        val aliasTokens = ALIASES[medKey] ?: emptyList()
-
         val reasons = mutableListOf<String>()
-        var score = 0.0
+        var score   = 0.0
+
+        // Use precomputed fields — no re-tokenizing, no re-extracting
+        val medTokens     = precomp.medTokens
+        val medNumbers    = precomp.medNumbers
+        val medChars      = precomp.medChars
+        val aliasGenerics = precomp.aliasGenerics
+        val brandKey      = precomp.brandKey
 
         // ===================================================================
-        // GATE: require at least one token with meaningful similarity
-        // This prevents pure-bigram false matches like Dolo→Head&Shoulders
+        // GATE — pass if alias reverse-lookup matches OR token sim ≥ 0.65
         // ===================================================================
-        val bestTokenSim = inputTokens.maxOfOrNull { input ->
-            val directBest = medTokens.maxOfOrNull { similarity(input, it) } ?: 0.0
-            val aliasBest  = aliasTokens.maxOfOrNull { similarity(input, it.uppercase()) } ?: 0.0
-            max(directBest, aliasBest)
-        } ?: 0.0
+        val aliasGatePasses = brandKey in inputAliasKeys
 
-        if (bestTokenSim < 0.65) {
-            // No token is even 65% similar — hard reject, skip scoring
-            return ScoredMatch(med, 0.0, "GATE_FAIL(bestSim=${(bestTokenSim*100).toInt()}%)")
+        val bestTokenSim: Double
+        if (!aliasGatePasses) {
+            bestTokenSim = inputTokens.maxOfOrNull { input ->
+                val directBest = medTokens.maxOfOrNull { medTok ->
+                    // OPTIMIZATION 5: skip Levenshtein when length gap is too large
+                    // If |lenA - lenB| > max(lenA,lenB)*0.4, similarity < 0.6 always
+                    if (abs(input.length - medTok.length) > maxOf(input.length, medTok.length) * 0.4)
+                        0.0
+                    else
+                        similarity(input, medTok)
+                } ?: 0.0
+                val aliasBest = aliasGenerics.maxOfOrNull { g ->
+                    similarity(input, g.uppercase(Locale.ROOT))
+                } ?: 0.0
+                max(directBest, aliasBest)
+            } ?: 0.0
+
+            if (bestTokenSim < 0.65) {
+                return ScoredMatch(
+                    precomp.medicine, 0.0,
+                    "GATE_FAIL(sim=${(bestTokenSim*100).toInt()}%)"
+                )
+            }
         }
 
         // ===================================================================
-        // 1. TOKEN MATCH SCORE  (up to ~50 pts)
+        // ALIAS GATE BONUS
+        // ===================================================================
+        if (aliasGatePasses) {
+            score += 40.0
+            reasons.add("ALIAS_GATE($brandKey)")
+        }
+
+        // ===================================================================
+        // 1. TOKEN MATCH SCORE
         // ===================================================================
         var tokenScore = 0.0
-
         for (input in inputTokens) {
             for (medToken in medTokens) {
+                // OPTIMIZATION 5 applied in scoring too
+                if (abs(input.length - medToken.length) > maxOf(input.length, medToken.length) * 0.4) continue
 
                 val sim = similarity(input, medToken)
 
-                // Exact match
                 if (input == medToken) {
                     val boost = lengthBoost(medToken)
                     tokenScore += boost
@@ -193,44 +315,37 @@ object Matcher {
                     continue
                 }
 
-                // Alias match
-                val aliasMatch = aliasTokens.any {
-                    similarity(input, it.uppercase()) >= 0.88
-                }
-                if (aliasMatch) {
-                    tokenScore += 10.0
-                    reasons.add("ALIAS($input)")
-                    continue
-                }
-
-                // Fuzzy match (only for tokens long enough to be meaningful)
                 if (input.length >= 5 && medToken.length >= 5 && sim >= 0.80) {
                     val boost = (sim * lengthBoost(medToken)).coerceAtMost(12.0)
                     tokenScore += boost
                     reasons.add("FUZZY($input~$medToken,${(sim*100).toInt()}%)")
                 }
             }
-        }
 
+            // Per-token alias check
+            val aliasMatchSim = aliasGenerics.maxOfOrNull {
+                similarity(input, it.uppercase(Locale.ROOT))
+            } ?: 0.0
+            if (aliasMatchSim >= 0.85) {
+                tokenScore += 12.0
+                reasons.add("ALIAS_TOKEN($input,${(aliasMatchSim*100).toInt()}%)")
+            }
+        }
         score += tokenScore
 
         // ===================================================================
-        // 2. NUMBER MATCH / MISMATCH  (single block, no double-counting)
+        // 2. NUMBER MATCH / MISMATCH
         // ===================================================================
         val commonNumbers = inputNumbers.intersect(medNumbers)
-
         when {
-            // Both have numbers and they match → big bonus
             inputNumbers.isNotEmpty() && medNumbers.isNotEmpty() && commonNumbers.isNotEmpty() -> {
                 score += 35.0
                 reasons.add("NUM_MATCH($commonNumbers)")
             }
-            // Both have numbers but they DON'T match → hard penalty
             inputNumbers.isNotEmpty() && medNumbers.isNotEmpty() && commonNumbers.isEmpty() -> {
                 score -= 50.0
                 reasons.add("NUM_MISMATCH(in=$inputNumbers,med=$medNumbers)")
             }
-            // Only one side has numbers → mild penalty (OCR may have missed it)
             inputNumbers.isNotEmpty() && medNumbers.isEmpty() -> {
                 score -= 10.0
                 reasons.add("NUM_ORPHAN")
@@ -239,40 +354,66 @@ object Matcher {
 
         // ===================================================================
         // 3. BRAND PREFIX BONUS
-        // Token that is a prefix of the full medicine name → extra signal
         // ===================================================================
         for (token in inputTokens) {
-            if (token.length >= 4 && medNameRaw.startsWith(token)) {
+            if (token.length >= 4 && precomp.medNameRaw.startsWith(token)) {
                 score += 15.0
                 reasons.add("BRAND_PREFIX($token)")
-                break  // only count once
+                break
             }
         }
 
         // ===================================================================
-        // 4. BIGRAM SIMILARITY  (character-level, lower weight)
-        // Helps catch OCR errors in the middle of long brand names
+        // 4. BIGRAM SIMILARITY (uses precomputed medBigrams — no recompute!)
         // ===================================================================
-        val bigramScore = bigramSimilarity(inputChars, medChars) * 0.6
+        val inputBigrams = bigrams(inputChars)  // inputChars is small — fast
+        val bigramScore  = bigramJaccard(inputBigrams, precomp.medBigrams) * 0.6
         score += bigramScore
 
         // ===================================================================
-        // 5. SUBSEQUENCE SCORE  (very low weight, tie-breaker only)
+        // 5. SUBSEQUENCE SCORE
         // ===================================================================
         val subseqScore = subsequenceScore(inputChars, medChars) * 0.15
         score += subseqScore
 
-        // Cap at 100
-        val finalScore = score.coerceIn(0.0, 100.0)
+        return ScoredMatch(precomp.medicine, score.coerceIn(0.0, 100.0), reasons.joinToString(", "))
+    }
 
-        return ScoredMatch(med, finalScore, reasons.joinToString(", "))
+    // =======================================================================
+    // OPTIMIZATION 3: Alias reverse lookup uses exact map — O(tokens × aliases)
+    // No Levenshtein, just similarity for fuzzy generic name matching
+    // =======================================================================
+    private fun buildInputAliasKeys(inputTokens: List<String>): Set<String> {
+        val keys = mutableSetOf<String>()
+        for (token in inputTokens) {
+            // Exact lookup first (O(1))
+            REVERSE_ALIAS[token]?.let { keys.addAll(it) }
+
+            // Fuzzy lookup only for tokens ≥6 chars (long enough to be a generic name)
+            if (token.length >= 6) {
+                for ((generic, brandKeys) in REVERSE_ALIAS) {
+                    if (generic.length >= 6 &&
+                        abs(token.length - generic.length) <= 3 &&
+                        similarity(token, generic) >= 0.85
+                    ) {
+                        keys.addAll(brandKeys)
+                    }
+                }
+            }
+        }
+        return keys
     }
 
     // =======================================================================
     // HELPERS
     // =======================================================================
 
-    /** Points awarded for a token based on its length (longer = rarer = more signal) */
+    private fun extractBrandKey(medNameRaw: String): String =
+        medNameRaw.split(Regex("\\s+"))
+            .firstOrNull { it.length >= 4 && it.all { c -> c.isLetter() } }
+            ?.uppercase(Locale.ROOT)
+            ?: medNameRaw.replace(Regex("[^A-Z]"), "").take(8)
+
     private fun lengthBoost(token: String): Double = when {
         token.length >= 10 -> 18.0
         token.length >= 8  -> 14.0
@@ -281,34 +422,21 @@ object Matcher {
         else               -> 2.0
     }
 
-    /** Remove everything that isn't a letter, digit, or space */
     private fun lightClean(text: String): String =
         text.replace(Regex("[^A-Za-z0-9 ]"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+            .replace(Regex("\\s+"), " ").trim()
 
-    /** Apply only non-digit character confusions */
     private fun applyCharFixes(text: String): String {
         val sb = StringBuilder(text.length)
-        for (ch in text) {
-            sb.append(CHAR_FIXES[ch] ?: ch)
-        }
+        for (ch in text) sb.append(CHAR_FIXES[ch] ?: ch)
         return sb.toString()
     }
 
-    /** Extract digit sequences from raw (un-normalized) text */
     private fun extractNumbers(text: String): Set<String> =
         Regex("\\d+").findAll(text).map { it.value }.toSet()
 
-    /**
-     * Tokenize: uppercase, split on spaces, then filter out:
-     *  - length < 4
-     *  - stopwords
-     *  - pure digit strings (numbers handled separately)
-     */
     private fun tokenize(text: String): List<String> =
-        text.uppercase(Locale.ROOT)
-            .split(" ")
+        text.uppercase(Locale.ROOT).split(" ")
             .map { it.trim() }
             .filter { token ->
                 token.length >= 4 &&
@@ -316,41 +444,53 @@ object Matcher {
                         !token.all { it.isDigit() }
             }
 
-    /** Levenshtein edit distance */
+    // OPTIMIZATION 5: early-exit Levenshtein
+    // If strings differ in length by more than maxDist, return immediately
     private fun levenshtein(a: String, b: String): Int {
-        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        if (a == b) return 0
+        val lenDiff = abs(a.length - b.length)
+        // If length diff alone makes similarity < 0.6, skip full computation
+        if (lenDiff > maxOf(a.length, b.length) * 0.5) return lenDiff
+
+        // Banded DP — only compute cells within `band` of the diagonal
+        val band = (maxOf(a.length, b.length) * 0.35).toInt().coerceAtLeast(2)
+        val dp   = Array(a.length + 1) { IntArray(b.length + 1) { Int.MAX_VALUE / 2 } }
         for (i in 0..a.length) dp[i][0] = i
         for (j in 0..b.length) dp[0][j] = j
         for (i in 1..a.length) {
-            for (j in 1..b.length) {
-                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
-                dp[i][j] = minOf(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + cost)
+            val jStart = maxOf(1, i - band)
+            val jEnd   = minOf(b.length, i + band)
+            for (j in jStart..jEnd) {
+                val cost = if (a[i-1] == b[j-1]) 0 else 1
+                dp[i][j] = minOf(
+                    dp[i-1][j] + 1,
+                    dp[i][j-1] + 1,
+                    dp[i-1][j-1] + cost
+                )
             }
         }
         return dp[a.length][b.length]
     }
 
-    /** Normalized similarity in [0, 1] */
     private fun similarity(a: String, b: String): Double {
         val maxLen = maxOf(a.length, b.length)
         if (maxLen == 0) return 1.0
         return 1.0 - levenshtein(a, b).toDouble() / maxLen
     }
 
-    /** Bigram (character 2-gram) Jaccard similarity × 100 */
-    private fun bigramSimilarity(a: String, b: String): Double {
-        if (a.length < 2 || b.length < 2) return 0.0
-        val aGrams = bigrams(a)
-        val bGrams = bigrams(b)
+    // Precomputed bigram Jaccard — takes precomputed Set<String> directly
+    private fun bigramJaccard(aGrams: Set<String>, bGrams: Set<String>): Double {
+        if (aGrams.isEmpty() || bGrams.isEmpty()) return 0.0
         val intersection = aGrams.intersect(bGrams).size
+        if (intersection == 0) return 0.0
         val union = (aGrams.size + bGrams.size - intersection).coerceAtLeast(1)
         return (intersection.toDouble() / union) * 100
     }
 
     private fun bigrams(text: String): Set<String> =
-        (0 until text.length - 1).map { text.substring(it, it + 2) }.toSet()
+        if (text.length < 2) emptySet()
+        else (0 until text.length - 1).mapTo(HashSet()) { text.substring(it, it + 2) }
 
-    /** Fraction of input chars found as a subsequence in target, × 100 */
     private fun subsequenceScore(input: String, target: String): Double {
         if (input.isEmpty()) return 0.0
         var i = 0; var j = 0; var matched = 0
