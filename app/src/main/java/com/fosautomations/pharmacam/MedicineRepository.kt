@@ -12,6 +12,7 @@ import java.util.*
 object MedicineRepository {
     private val database = mutableListOf<Medicine>()
     private val invertedIndex = mutableMapOf<String, MutableSet<Medicine>>()
+    private val categoryIndex = mutableMapOf<ProductCategory, MutableList<Medicine>>()
     private var isLoaded = false
 
     private val NOISE = setOf(
@@ -19,9 +20,26 @@ object MedicineRepository {
         "DATE", "MRP", "EXTERNAL", "TREATMENT", "INFECTION", "THE"
     )
 
-    fun getDatabase(): List<Medicine> = database
+    fun getDatabase(): List<Medicine> = synchronized(database) { database.toList() }
 
-    fun getIndex(): Map<String, Set<Medicine>> = invertedIndex
+    fun isReady(): Boolean = synchronized(database) { isLoaded && database.isNotEmpty() }
+
+    fun getIndex(): Map<String, Set<Medicine>> = synchronized(invertedIndex) { invertedIndex.toMap() }
+
+    fun getByCategory(category: ProductCategory): List<Medicine> = synchronized(categoryIndex) { 
+        categoryIndex[category]?.toList().orEmpty() 
+    }
+
+    /** Medicines for matcher when a package category is predicted. */
+    fun getByCategoryFilter(filter: ProductCategory): List<Medicine> = synchronized(database) {
+        val categories = ProductCategoryClassifier.matchingCategories(filter)
+        if (categories.size >= ProductCategory.entries.size) return database.toList()
+        val seen = LinkedHashSet<Medicine>()
+        categories.forEach { category ->
+            categoryIndex[category]?.let { seen.addAll(it) }
+        }
+        seen.toList()
+    }
 
     suspend fun loadIfNeeded(context: Context) {
         if (isLoaded) return
@@ -45,24 +63,29 @@ object MedicineRepository {
     }
 
     private fun parseJsonArray(jsonArray: JSONArray) {
-        database.clear()
-        invertedIndex.clear()
-        
-        for (i in 0 until jsonArray.length()) {
-            val medicine = when (val item = jsonArray.get(i)) {
-                is JSONObject -> Medicine(
-                    item.optString("name", "Unknown"),
-                    item.optString("id", UUID.randomUUID().toString())
-                )
-                is String -> Medicine(item, UUID.randomUUID().toString())
-                else -> null
+        synchronized(database) {
+            database.clear()
+            invertedIndex.clear()
+            categoryIndex.clear()
+            
+            for (i in 0 until jsonArray.length()) {
+                val medicine = when (val item = jsonArray.get(i)) {
+                    is JSONObject -> Medicine(
+                        item.optString("name", "Unknown"),
+                        item.optString("id", UUID.randomUUID().toString())
+                    )
+                    is String -> Medicine(item, UUID.randomUUID().toString())
+                    else -> null
+                }
+                medicine?.let { addInternalLocked(it) }
             }
-            medicine?.let { addInternal(it) }
         }
     }
 
-    private fun addInternal(medicine: Medicine) {
+    private fun addInternalLocked(medicine: Medicine) {
         database.add(medicine)
+        val category = ProductCategoryClassifier.classify(medicine.name, ClassificationSource.DATABASE)
+        categoryIndex.getOrPut(category) { mutableListOf() }.add(medicine)
         tokenize(medicine.name).forEach { word ->
             if (word.length >= 3 && (word !in NOISE)) {
                 invertedIndex.getOrPut(word) { mutableSetOf() }.add(medicine)
@@ -80,36 +103,45 @@ object MedicineRepository {
 
     suspend fun addMedicine(context: Context, medicine: Medicine) {
         withContext(Dispatchers.IO) {
-            addInternal(medicine)
+            synchronized(database) {
+                addInternalLocked(medicine)
+            }
             save(context)
         }
     }
 
     suspend fun deleteMedicine(context: Context, id: String) {
         withContext(Dispatchers.IO) {
-            val med = database.find { it.id == id }
-            if (med != null) {
-                database.remove(med)
-                rebuildIndex()
-                save(context)
+            synchronized(database) {
+                val med = database.find { it.id == id }
+                if (med != null) {
+                    database.remove(med)
+                    rebuildIndexLocked()
+                }
             }
+            save(context)
         }
     }
 
     suspend fun updateMedicine(context: Context, id: String, newName: String) {
         withContext(Dispatchers.IO) {
-            val index = database.indexOfFirst { it.id == id }
-            if (index != -1) {
-                database[index] = database[index].copy(name = newName)
-                rebuildIndex()
-                save(context)
+            synchronized(database) {
+                val index = database.indexOfFirst { it.id == id }
+                if (index != -1) {
+                    database[index] = database[index].copy(name = newName)
+                    rebuildIndexLocked()
+                }
             }
+            save(context)
         }
     }
 
-    private fun rebuildIndex() {
+    private fun rebuildIndexLocked() {
         invertedIndex.clear()
+        categoryIndex.clear()
         database.forEach { med ->
+            val category = ProductCategoryClassifier.classify(med.name, ClassificationSource.DATABASE)
+            categoryIndex.getOrPut(category) { mutableListOf() }.add(med)
             tokenize(med.name).forEach { word ->
                 if (word.length >= 3 && (word !in NOISE)) {
                     invertedIndex.getOrPut(word) { mutableSetOf() }.add(med)
@@ -120,11 +152,13 @@ object MedicineRepository {
 
     private fun save(context: Context) {
         val jsonArray = JSONArray()
-        database.forEach { med ->
-            val obj = JSONObject()
-            obj.put("name", med.name)
-            obj.put("id", med.id)
-            jsonArray.put(obj)
+        synchronized(database) {
+            database.forEach { med ->
+                val obj = JSONObject()
+                obj.put("name", med.name)
+                obj.put("id", med.id)
+                jsonArray.put(obj)
+            }
         }
         File(context.filesDir, "user_medicines.json").writeText(jsonArray.toString())
     }

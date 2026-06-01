@@ -1,0 +1,8 @@
+Cream
+Drops
+Injection
+Lotion
+Other
+Pill
+Powder
+Tonic

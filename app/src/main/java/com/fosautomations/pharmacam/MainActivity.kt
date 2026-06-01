@@ -59,6 +59,8 @@ import java.util.Locale
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class MainActivity : AppCompatActivity() {
 
@@ -86,9 +88,12 @@ class MainActivity : AppCompatActivity() {
     private var currentPillCount: Int? = null
     private var currentVisiblePackQuantity: Int? = null
     private var latestScanText: String? = null
+    private var lastOcrRaw: String? = null
+    private var lastSearchQuery: String? = null
 
     private lateinit var cameraExecutor: ExecutorService
     private val matchingScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var beep: ToneGenerator? = null
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -231,7 +236,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnShutter.setOnClickListener {
-            captureAndScan()
+            requestShutterCapture()
         }
 
         val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
@@ -276,17 +281,36 @@ class MainActivity : AppCompatActivity() {
     //     NV21 → JPEG-encode → JPEG-decode roundtrip (was 3 extra allocs)
     //  3. Single rotation pass (original double-rotated: toDetectorBitmap
     //     already rotated, then the let-block rotated again)
-    //  4. Combined centerCrop+cropBrandRegion in one Bitmap.createBitmap call
-    //     instead of two, eliminating one intermediate Bitmap
+    //  4. LabelOcrHelper.cropBrandRegion + prepareForOcr + line-scored text
     // =======================================================================
-    private fun captureAndScan() {
+    /** Focus briefly, then take the still — improves sharpness on real devices. */
+    private fun requestShutterCapture() {
+        if (isCapturing || isMatching || isListening) return
+        if (imageCapture == null) {
+            Toast.makeText(this, "Camera not ready", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Log.d(TAG, "SHUTTER: tap (preview blur=$lastBlurStatus glare=$lastGlareStatus)")
+        binding.btnShutter.isEnabled = false
+        binding.statusText.text = "Focusing…"
+        binding.statusText.setTextColor("#FF9800".toColorInt())
+        triggerCaptureFocus()
+        mainHandler.postDelayed({ performShutterCapture() }, 550)
+    }
+
+    private fun performShutterCapture() {
         val capture = imageCapture ?: run {
+            binding.btnShutter.isEnabled = true
             Toast.makeText(this, "Camera not ready", Toast.LENGTH_SHORT).show()
             return
         }
 
-        if (isCapturing || isMatching || isListening) return
+        if (isCapturing || isMatching || isListening) {
+            binding.btnShutter.isEnabled = true
+            return
+        }
 
+        Log.d(TAG, "SHUTTER: taking picture")
         isCapturing = true
         binding.scanBox.setBackgroundColor("#4D4CAF50".toColorInt())
         binding.statusText.text = "Capturing…"
@@ -302,31 +326,22 @@ class MainActivity : AppCompatActivity() {
                         Log.d(TAG, "SHUTTER: capture success")
 
                         // --- Quality check directly on Y plane — zero Bitmap allocation ---
-                        if (imageProxy.hasExcessiveGlareYPlane()) {
+                        val glare = imageProxy.hasExcessiveGlareYPlane()
+                        val blur = imageProxy.isBlurryYPlane()
+                        val blurScore = imageProxy.blurScoreYPlane()
+                        Log.d(
+                            TAG,
+                            "SHUTTER: quality glare=$glare blur=$blur blurScore=$blurScore " +
+                                "(still running OCR)"
+                        )
+                        if (glare || blur) {
                             runOnUiThread {
-                                finishCapture()
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Too much glare — tilt the strip and try again",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                binding.statusText.text = "Too much glare - tilt strip"
-                                binding.statusText.setTextColor("#F44336".toColorInt())
-                            }
-                            return
-                        }
-                        if (imageProxy.isBlurryYPlane()) {
-                            runOnUiThread {
-                                finishCapture()
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Image blurry — hold steady and try again",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                binding.statusText.text = "Image blurry - hold steady"
+                                binding.statusText.text = when {
+                                    glare -> "Glare detected — OCR will try anyway"
+                                    else -> "Blur detected — OCR will try anyway"
+                                }
                                 binding.statusText.setTextColor("#FF9800".toColorInt())
                             }
-                            return
                         }
 
                         // --- Single Bitmap conversion, single rotation pass ---
@@ -344,52 +359,8 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
 
-                        // --- Combined crop: centerCrop(0.72,0.32) + cropBrandRegion ---
-                        // centerCrop(0.72,0.32) → x∈[14%,86%], y∈[34%,66%]
-                        // cropBrandRegion takes middle 50% of that height slice
-                        //   → y∈[34%+8%, 34%+24%] = [42%, 58%] of original bitmap
-                        // One Bitmap.createBitmap instead of two; one fewer allocation.
-                        val ocrBitmap = run {
-                            val left   = (bitmap.width  * 0.14f).toInt()
-                            val top    = (bitmap.height * 0.42f).toInt()
-                            val width  = (bitmap.width  * 0.72f).toInt().coerceAtLeast(1)
-                            val height = (bitmap.height * 0.16f).toInt().coerceAtLeast(1)
-                            Bitmap.createBitmap(bitmap, left, top, width, height)
-                        }
-                        bitmap.recycle()
-
-                        val processedBitmap = preprocessForOCR(ocrBitmap)
-                        ocrBitmap.recycle()
-
-                        val inputImage = InputImage.fromBitmap(processedBitmap, 0)
-
-                        recognizer.process(inputImage)
-                            .addOnSuccessListener { visionText ->
-                                val fullText = visionText.text
-                                    .replace("\n", " ")
-                                    .trim()
-                                Log.d(TAG, "SHUTTER OCR TEXT: $fullText")
-                                runOnUiThread { finishCapture() }
-                                if (fullText.length >= 3) {
-                                    processRawOutput(fullText)
-                                } else {
-                                    runOnUiThread {
-                                        binding.statusText.text = "Nothing readable — move closer"
-                                        binding.statusText.setTextColor("#FF9800".toColorInt())
-                                    }
-                                }
-                            }
-                            .addOnFailureListener { e ->
-                                Log.e(TAG, "SHUTTER OCR failed", e)
-                                runOnUiThread {
-                                    finishCapture()
-                                    binding.statusText.text = "OCR failed"
-                                    binding.statusText.setTextColor("#F44336".toColorInt())
-                                }
-                            }
-                            .addOnCompleteListener {
-                                processedBitmap.recycle()
-                            }
+                        scanStartTime = System.currentTimeMillis()
+                        runLabelOcrFromCapture(bitmap, fromShutter = true)
 
                     } finally {
                         imageProxy.close()
@@ -415,6 +386,123 @@ class MainActivity : AppCompatActivity() {
         isCapturing = false
         binding.btnShutter.isEnabled = true
         binding.scanBox.setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    private fun triggerCaptureFocus() {
+        try {
+            val w = binding.previewView.width.toFloat().coerceAtLeast(1f)
+            val h = binding.previewView.height.toFloat().coerceAtLeast(1f)
+            val factory = SurfaceOrientedMeteringPointFactory(w, h)
+            val point = factory.createPoint(w / 2f, h / 2f)
+            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                .setAutoCancelDuration(2, TimeUnit.SECONDS)
+                .build()
+            cameraInstance?.cameraControl?.startFocusAndMetering(action)
+        } catch (e: Exception) {
+            Log.w(TAG, "SHUTTER: focus trigger failed", e)
+        }
+    }
+
+    /**
+     * Two crops (center + brand band), each with enhance + optional binarized pass.
+     */
+    private fun runLabelOcrFromCapture(
+        fullBitmap: Bitmap,
+        fromShutter: Boolean,
+        onFinished: (() -> Unit)? = null
+    ) {
+        matchingScope.launch {
+            try {
+                withContext(Dispatchers.Main) {
+                    binding.loader.visibility = View.VISIBLE
+                    binding.statusText.text = "Reading label…"
+                    binding.statusText.setTextColor("#FF9800".toColorInt())
+                }
+
+                val centerCrop = LabelOcrHelper.cropCenterRegion(fullBitmap)
+                val brandCrop = LabelOcrHelper.cropBrandRegion(fullBitmap)
+                fullBitmap.recycle()
+
+                Log.d(
+                    TAG,
+                    "OCR crops: center=${centerCrop.width}x${centerCrop.height} " +
+                        "brand=${brandCrop.width}x${brandCrop.height}"
+                )
+
+                val centerDeferred = async(Dispatchers.Default) { recognizeCrop(centerCrop) }
+                val brandDeferred = async(Dispatchers.Default) { recognizeCrop(brandCrop) }
+                val best = LabelOcrHelper.pickBest(centerDeferred.await(), brandDeferred.await())
+
+                withContext(Dispatchers.Main) {
+                    binding.loader.visibility = View.GONE
+                    deliverOcrResult(best, fromShutter)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "OCR pipeline failed", e)
+                withContext(Dispatchers.Main) {
+                    binding.loader.visibility = View.GONE
+                    if (fromShutter) finishCapture()
+                    binding.statusText.text = "OCR failed"
+                    binding.statusText.setTextColor("#F44336".toColorInt())
+                    Toast.makeText(
+                        this@MainActivity,
+                        "OCR failed — tap green camera again",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } finally {
+                onFinished?.invoke()
+            }
+        }
+    }
+
+    private suspend fun recognizeCrop(crop: Bitmap): LabelOcrHelper.OcrResult {
+        val prepared = LabelOcrHelper.prepareForOcr(crop)
+        crop.recycle()
+        val primary = recognizePrepared(prepared)
+        if (!LabelOcrHelper.needsFallback(primary)) {
+            prepared.recycle()
+            return primary
+        }
+        Log.d(TAG, "OCR: binarized fallback on crop ${prepared.width}x${prepared.height}")
+        val binarized = LabelOcrHelper.preprocessBinarized(prepared)
+        prepared.recycle()
+        val secondary = recognizePrepared(binarized)
+        binarized.recycle()
+        return LabelOcrHelper.pickBetter(primary, secondary)
+    }
+
+    private suspend fun recognizePrepared(bitmap: Bitmap): LabelOcrHelper.OcrResult =
+        suspendCancellableCoroutine { cont ->
+            recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                .addOnSuccessListener { visionText ->
+                    if (cont.isActive) cont.resume(LabelOcrHelper.extractBestText(visionText))
+                }
+                .addOnFailureListener { e ->
+                    if (cont.isActive) cont.resumeWithException(e)
+                }
+        }
+
+    private fun deliverOcrResult(result: LabelOcrHelper.OcrResult, fromShutter: Boolean) {
+        Log.d(TAG, "OCR line: ${result.matchText}")
+        Log.d(TAG, "OCR full: ${result.fullText}")
+
+        if (fromShutter) finishCapture()
+
+        val ocrForMatch = result.fullText.ifBlank { result.matchText }
+        if (ocrForMatch.length >= 3) {
+            binding.resultTextView.text = getString(R.string.matching_medicine)
+            binding.resultTextView.setTextColor("#FF9800".toColorInt())
+            processRawOutput(ocrForMatch)
+        } else {
+            binding.statusText.text = "Nothing readable — move closer & tap camera"
+            binding.statusText.setTextColor("#FF9800".toColorInt())
+            Toast.makeText(
+                this,
+                "Could not read text — hold steady and tap green camera",
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     private fun startVoiceRecognition() {
@@ -738,22 +826,22 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 when {
                     lastGlareStatus -> {
-                        binding.statusText.text = "Too much glare - tilt strip"
+                        binding.statusText.text = "Glare — tilt strip (tap shutter to scan)"
                         binding.statusText.setTextColor("#F44336".toColorInt())
-                        binding.btnShutter.isEnabled = false
                     }
                     lastBlurStatus -> {
-                        binding.statusText.text = "Image blurry - hold steady"
+                        binding.statusText.text = "Blurry — still tap green camera"
                         binding.statusText.setTextColor("#FF9800".toColorInt())
-                        binding.btnShutter.isEnabled = false
                     }
                     else -> {
                         if (!isCapturing && !isMatching) {
                             binding.statusText.text = getString(R.string.ready_status)
                             binding.statusText.setTextColor("#4CAF50".toColorInt())
-                            binding.btnShutter.isEnabled = true
                         }
                     }
+                }
+                if (!isCapturing && !isMatching) {
+                    binding.btnShutter.isEnabled = true
                 }
             }
         } catch (e: Exception) {
@@ -794,7 +882,7 @@ class MainActivity : AppCompatActivity() {
 
     // Kept for potential future re-enable of live OCR.
     // All helpers it calls (toDetectorBitmap, hasExcessiveGlare, isBlurry,
-    // preprocessForOCR) now use their optimized implementations below.
+    // LabelOcrHelper for OCR preprocessing and line scoring.
     @OptIn(ExperimentalGetImage::class)
     private fun processImageWithOCR(imageProxy: ImageProxy) {
         try {
@@ -821,35 +909,11 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val brandBitmap     = cropBrandRegion(croppedBitmap)
-            val processedBitmap = preprocessForOCR(brandBitmap)
-            val image           = InputImage.fromBitmap(processedBitmap, 0)
-
-            recognizer.process(image)
-                .addOnSuccessListener { visionText ->
-                    val fullText = visionText.text.replace("\n", " ").trim()
-                    Log.d(TAG, "OCR TEXT: $fullText")
-                    if (fullText.length >= 3) {
-                        processRawOutput(fullText)
-                    } else {
-                        runOnUiThread {
-                            binding.statusText.text = "Move closer to strip"
-                            binding.statusText.setTextColor("#FF9800".toColorInt())
-                        }
-                    }
-                }
-                .addOnFailureListener { e ->
-                    Log.e(TAG, "OCR FAILED", e)
-                    runOnUiThread {
-                        binding.statusText.text = "OCR failed"
-                        binding.statusText.setTextColor("#F44336".toColorInt())
-                    }
-                }
-                .addOnCompleteListener {
-                    bitmap.recycle(); croppedBitmap.recycle()
-                    brandBitmap.recycle(); processedBitmap.recycle()
-                    imageProxy.close()
-                }
+            scanStartTime = System.currentTimeMillis()
+            bitmap.recycle()
+            runLabelOcrFromCapture(croppedBitmap, fromShutter = false) {
+                imageProxy.close()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "processImageWithOCR ERROR", e)
             imageProxy.close()
@@ -873,10 +937,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun processRawOutput(text: String) {
+        lastOcrRaw = text
         Log.d("MATCHER_DEBUG", "processRawOutput called with: '$text'")
         runOnUiThread {
-            latestScanText = text.toSampleText()
-            binding.statusText.text = "Matching: $text"
             extractVisibleQuantity(text)?.let { quantity ->
                 currentVisiblePackQuantity = quantity
                 if (binding.qtyToggle.isChecked && currentPillCount == null) {
@@ -888,14 +951,14 @@ class MainActivity : AppCompatActivity() {
 
         isMatching = true
         matchingScope.launch(Dispatchers.Default) {
-            val matches = Matcher.findTopMatches(text, blacklist, 3)
-            val topMatch = matches.firstOrNull()
+            val resolved = MedicineNameResolver.resolve(text, blacklist, 3)
+            lastSearchQuery = resolved.searchQuery
             val scanTime = System.currentTimeMillis() - scanStartTime
 
             logScanMetrics(
-                ocr        = text,
-                topMatch   = topMatch?.medicine?.name ?: "NONE",
-                confidence = topMatch?.score?.toInt() ?: 0,
+                ocr        = resolved.searchQuery.ifBlank { text },
+                topMatch   = resolved.medicine?.name ?: "NONE",
+                confidence = resolved.score.toInt(),
                 blurry     = lastBlurStatus,
                 glare      = lastGlareStatus,
                 timeMs     = scanTime
@@ -903,19 +966,42 @@ class MainActivity : AppCompatActivity() {
 
             withContext(Dispatchers.Main) {
                 isMatching = false
+                val matches = resolved.alternatives
                 if (matches.isEmpty()) {
-                    Log.e("MATCHER_DEBUG", "NO MATCHES FOUND!")
-                    binding.statusText.text = "No match for: $text"
-                    Toast.makeText(this@MainActivity, "No matches - try again", Toast.LENGTH_LONG).show()
+                    Log.e(TAG, "MATCH: no medicines for query '${resolved.searchQuery}'")
+                    binding.statusText.text = "No match in medicines.json"
+                    binding.resultTextView.text = getString(R.string.no_match_instruction)
+                    binding.resultTextView.setTextColor("#F44336".toColorInt())
+                    Toast.makeText(this@MainActivity, "Not in your medicine list", Toast.LENGTH_LONG).show()
+                    return@withContext
+                }
+
+                val top = matches.first()
+                latestScanText = top.medicine.name
+                Log.d(
+                    TAG,
+                    "MATCH: '${resolved.searchQuery}' → ${top.medicine.name} (${top.score.toInt()}%)"
+                )
+
+                if (MedicineNameResolver.shouldAutoPick(resolved)) {
+                    binding.top3Container.visibility = View.GONE
+                    onMedicineDetected(top.medicine)
+                    Toast.makeText(
+                        this@MainActivity,
+                        top.medicine.name,
+                        Toast.LENGTH_SHORT
+                    ).show()
                 } else {
-                    Log.d("MATCHER_DEBUG", "Showing ${matches.size} suggestions")
-                    showSuggestionsUI(text, matches)
+                    binding.resultTextView.text = top.medicine.name
+                    binding.resultTextView.setTextColor("#4CAF50".toColorInt())
+                    binding.statusText.text = getString(R.string.select_match_instruction)
+                    showSuggestionsUI(matches)
                 }
             }
         }
     }
 
-    private fun showSuggestionsUI(rawText: String, matches: List<Matcher.ScoredMatch>) {
+    private fun showSuggestionsUI(matches: List<Matcher.ScoredMatch>) {
         if (binding.switchMode.isChecked) {
             onMedicineDetected(matches.first().medicine)
             return
@@ -945,10 +1031,15 @@ class MainActivity : AppCompatActivity() {
                 background = ContextCompat.getDrawable(this@MainActivity, android.R.drawable.btn_default)
                 backgroundTintList = android.content.res.ColorStateList.valueOf("#33F44336".toColorInt())
                 setColorFilter("#F44336".toColorInt())
-                setOnClickListener { blacklist.add(med.name); processRawOutput(rawText) }
+                setOnClickListener {
+                    blacklist.add(med.name)
+                    lastOcrRaw?.let { processRawOutput(it) }
+                }
             }
             layout.setOnClickListener {
-                learningMemory[rawText.uppercase(Locale.ROOT)] = med.name
+                lastOcrRaw?.let { raw ->
+                    learningMemory[raw.uppercase(Locale.ROOT)] = med.name
+                }
                 onMedicineDetected(med)
                 binding.top3Container.visibility = View.GONE
             }
@@ -957,8 +1048,6 @@ class MainActivity : AppCompatActivity() {
             binding.top3Choices.addView(layout)
         }
 
-        binding.resultTextView.text = getString(R.string.select_match_instruction)
-        binding.resultTextView.setTextColor("#FF9800".toColorInt())
         beep?.startTone(ToneGenerator.TONE_PROP_BEEP, 100)
     }
 
@@ -1244,6 +1333,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacksAndMessages(null)
         cameraExecutor.shutdown()
         matchingScope.cancel()
         recognizer.close()
@@ -1313,38 +1403,6 @@ class MainActivity : AppCompatActivity() {
         return token.replace(SAMPLE_ALPHA_REGEX, "").ifBlank { normalized }
     }
 
-    private fun cropBrandRegion(bitmap: Bitmap): Bitmap {
-        val startY     = bitmap.height / 4
-        val cropHeight = bitmap.height / 2
-        return Bitmap.createBitmap(bitmap, 0, startY, bitmap.width, cropHeight)
-    }
-
-    // Replaced per-pixel getPixel(x,y)/setPixel(x,y) loop with a single
-    // getPixels() bulk read into an IntArray, in-memory processing, then a
-    // single setPixels() write. Reduces JNI call count from O(w×h) to 2.
-    // Integer luma weights (×77/×150/×29, ushr 8) replace floating-point math.
-    private fun preprocessForOCR(bitmap: Bitmap): Bitmap {
-        val w = bitmap.width
-        val h = bitmap.height
-        val pixels = IntArray(w * h)
-        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-        for (i in pixels.indices) {
-            val p    = pixels[i]
-            // BT.601 luma via integer arithmetic: avoids FP conversion per pixel
-            val gray = ((p shr 16 and 0xFF) * 77 + (p shr 8 and 0xFF) * 150 + (p and 0xFF) * 29) ushr 8
-            val e    = when {
-                gray > 220 -> 255
-                gray > 160 -> 220
-                gray > 100 -> 150
-                else       -> 50
-            }
-            pixels[i] = (0xFF shl 24) or (e shl 16) or (e shl 8) or e
-        }
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        out.setPixels(pixels, 0, w, 0, 0, w, h)
-        return out
-    }
-
     // Bulk getPixels() replaces per-pixel getPixel() calls.
     // Used by processImageWithOCR (live OCR fallback path).
     private fun hasExcessiveGlare(bitmap: Bitmap): Boolean {
@@ -1388,7 +1446,7 @@ class MainActivity : AppCompatActivity() {
             }
             row += 5
         }
-        return count > 0 && diffSum.toFloat() / count < 5f
+        return count > 0 && diffSum.toFloat() / count < 3.2f
     }
 
     // -----------------------------------------------------------------------
@@ -1442,8 +1500,39 @@ class MainActivity : AppCompatActivity() {
                 }
                 row += 5
             }
-            count > 0 && diffSum.toFloat() / count < 5f
+            count > 0 && diffSum.toFloat() / count < 3.2f
         } catch (_: Exception) { false }
+    }
+
+    /** Average Y-plane edge strength in scan ROI (higher = sharper). For logging only. */
+    private fun ImageProxy.blurScoreYPlane(): Float {
+        return try {
+            val buf = planes[0].buffer
+            val stride = planes[0].rowStride
+            val w = width
+            val h = height
+            val x0 = (w * 0.14f).toInt() + 1
+            val x1 = (w * 0.86f).toInt()
+            val y0 = (h * 0.34f).toInt() + 1
+            val y1 = (h * 0.66f).toInt()
+            var diffSum = 0L
+            var count = 0
+            var row = y0
+            while (row < y1) {
+                var col = x0
+                while (col < x1) {
+                    val cur = buf.get(row * stride + col).toInt() and 0xFF
+                    val prev = buf.get((row - 1) * stride + (col - 1)).toInt() and 0xFF
+                    diffSum += abs(cur - prev)
+                    count++
+                    col += 5
+                }
+                row += 5
+            }
+            if (count == 0) 0f else diffSum.toFloat() / count
+        } catch (_: Exception) {
+            0f
+        }
     }
 
     private fun Bitmap.centerCrop(widthPercent: Float, heightPercent: Float): Bitmap {

@@ -1,6 +1,9 @@
 <resources>
     <string name="app_name">PharmaCam</string>
-    <string name="ready_status">READY TO SCAN</string>
+    <string name="ready_status">READY — tap green camera</string>
+    <string name="scan_hint">Tap the green camera button below the preview</string>
+    <string name="matching_medicine">Finding medicine…</string>
+    <string name="no_match_instruction">Not in medicines.json</string>
     <string name="listening_status">LISTENING...</string>
     <string name="processing_status">PROCESSING...</string>
     <string name="analyzing_status">ANALYZING...</string>

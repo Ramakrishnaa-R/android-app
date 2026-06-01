@@ -10,7 +10,8 @@ import kotlin.math.*
 // Value = list of generic / OCR-variant names for that brand
 // ---------------------------------------------------------------------------
 private val ALIASES: Map<String, List<String>> = mapOf(
-    "DOLO"       to listOf("PARACETAMOL", "ACETAMINOPHEN", "CROCIN", "CALPOL", "PACIMOL"),
+    "DOLO"       to listOf("PARACETAMOL", "PAROCETAMOL", "PUROCETAMOL", "PUROCETOMOL", "FUROCETOMOL", "FUROCETAMOL", "ACETAMINOPHEN", "CROCIN", "CALPOL", "PACIMOL", "DOLO-650", "DOLO650", "DOLE650"),
+    "DOLOPAR"    to listOf("PARACETAMOL", "DOLO-650", "DOLO650"),
     "CROCIN"     to listOf("PARACETAMOL", "ACETAMINOPHEN"),
     "CALPOL"     to listOf("PARACETAMOL", "ACETAMINOPHEN"),
     "AZTOR"      to listOf("ATORVASTATIN", "LIPITOR"),
@@ -41,6 +42,8 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "MOXIKIND"   to listOf("AMOXICILLIN", "AMOXYCILLIN", "CLAVULANATE"),
     "AZEE"       to listOf("AZITHROMYCIN"),
     "AZITHRAL"   to listOf("AZITHROMYCIN"),
+    "ALKALIZER"  to listOf("ALKAZAR"),
+    "ALKOF"      to listOf("COFGELS", "COFGEL"),
 )
 
 // ---------------------------------------------------------------------------
@@ -144,13 +147,19 @@ object Matcher {
     fun findTopMatches(
         rawInput: String,
         blacklist: Set<String>,
-        maxResults: Int = 3
+        maxResults: Int = 3,
+        categoryFilter: ProductCategory? = null
     ): List<ScoredMatch> {
 
         // Lazy index build (first call only — ~50ms one-time cost)
         if (precomputedDb.isEmpty()) buildIndex()
 
         Log.d("MATCHER", "========== MATCHING START ==========")
+
+        val database = categoryFilter?.let { filter ->
+            val filterNames = MedicineRepository.getByCategoryFilter(filter).map { it.name }.toSet()
+            precomputedDb.filter { it.medicine.name in filterNames }
+        } ?: precomputedDb
 
         // --- Input processing (same as before) ---
         val inputNumbers     = extractNumbers(rawInput)
@@ -189,7 +198,7 @@ object Matcher {
 
         data class BigramCandidate(val precomp: PrecomputedMedicine, val bigramScore: Double)
 
-        val candidates = precomputedDb
+        val candidates = database
             .asSequence()
             .filter { it.medicine.name !in blacklist }
             .map { precomp ->
