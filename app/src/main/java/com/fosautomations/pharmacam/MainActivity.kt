@@ -9,7 +9,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.Rect
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.wifi.WifiManager
@@ -49,10 +48,8 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.text.SimpleDateFormat
-import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.min
 import kotlin.math.abs
 import java.util.Date
 import java.util.Locale
@@ -112,14 +109,9 @@ class MainActivity : AppCompatActivity() {
 
     private val TAG = "TOM_DEBUG"
     private val sampleFileName = "sample.txt"
-    private val junkPatterns = listOf(
-        "/", "\\", ">", "<", "Studio", "projects", "artifacts",
-        "tbf42ccf", "Option", "Command", "Shift", "Caps", "Control",
-        "Android", "Phase", "Model", "Repo", "Standard", "Implementation",
-        "OCR", "Ready", "Voice"
-    )
 
     companion object {
+        var pendingOcrResult: String? = null
         // Pre-compiled once at class load — never recompiled per-call
         private val UNIT_QTY_REGEX = Regex(
             """\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b"""
@@ -326,7 +318,6 @@ class MainActivity : AppCompatActivity() {
                     try {
                         Log.d(TAG, "SHUTTER: capture success")
 
-                        // --- Quality check directly on Y plane — zero Bitmap allocation ---
                         val glare = imageProxy.hasExcessiveGlareYPlane()
                         val blur = imageProxy.isBlurryYPlane()
                         val blurScore = imageProxy.blurScoreYPlane()
@@ -346,9 +337,6 @@ class MainActivity : AppCompatActivity() {
                         }
 
                         // --- Single Bitmap conversion, single rotation pass ---
-                        // toBitmap() does not rotate; we apply rotation exactly once.
-                        // (The old toDetectorBitmap() already rotated, then the let-block
-                        // rotated again — net effect was double rotation on portrait devices.)
                         val bitmap = imageProxy.toBitmap().let { bmp ->
                             val deg = imageProxy.imageInfo.rotationDegrees
                             if (deg == 0) bmp
@@ -782,7 +770,7 @@ class MainActivity : AppCompatActivity() {
                         }
 
                         val imageCaptureUseCase = ImageCapture.Builder()
-                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                             .setTargetRotation(binding.previewView.display.rotation)
                             .build()
@@ -849,6 +837,11 @@ class MainActivity : AppCompatActivity() {
             lastBlurStatus  = imageProxy.isBlurryYPlane()
 
             runOnUiThread {
+                // Don't overwrite anything if we have a match or suggestions showing
+                if (currentMatch != null || binding.top3Container.visibility == View.VISIBLE) {
+                    return@runOnUiThread
+                }
+
                 when {
                     lastGlareStatus -> {
                         binding.statusText.text = "Glare — tilt strip (tap shutter to scan)"
@@ -859,9 +852,26 @@ class MainActivity : AppCompatActivity() {
                         binding.statusText.setTextColor("#FF9800".toColorInt())
                     }
                     else -> {
+                        val wasDisabled = !binding.btnShutter.isEnabled
                         if (!isCapturing && !isMatching) {
                             binding.statusText.text = getString(R.string.ready_status)
                             binding.statusText.setTextColor("#4CAF50".toColorInt())
+                            if (wasDisabled) {
+                                cameraInstance?.let { camera ->
+                                    val factory = SurfaceOrientedMeteringPointFactory(
+                                        binding.previewView.width.toFloat(),
+                                        binding.previewView.height.toFloat()
+                                    )
+                                    val point = factory.createPoint(
+                                        binding.previewView.width / 2f,
+                                        binding.previewView.height / 2f
+                                    )
+                                    val action = FocusMeteringAction.Builder(point)
+                                        .setAutoCancelDuration(5, TimeUnit.SECONDS)
+                                        .build()
+                                    camera.cameraControl.startFocusAndMetering(action)
+                                }
+                            }
                         }
                     }
                 }
@@ -970,8 +980,8 @@ class MainActivity : AppCompatActivity() {
     private fun processRawOutput(text: String) {
         lastOcrRaw = text
         Log.d("MATCHER_DEBUG", "processRawOutput called with: '$text'")
+        Log.d("MATCHER_DEBUG", Matcher.debugInput(text))
 
-        // Display only — matching still uses raw OCR via MedicineNameResolver.resolve(text, …)
         val normalized = Matcher.normalize(text)
         val searchQuery = MedicineNameResolver.buildSearchQuery(text)
 
@@ -1498,6 +1508,12 @@ class MainActivity : AppCompatActivity() {
         return count > 0 && diffSum.toFloat() / count < 3.2f
     }
 
+    private fun removeSpecularHighlights(bitmap: Bitmap): Bitmap =
+        ImageUtils.removeSpecularHighlights(bitmap)
+
+    private fun adaptiveThreshold(bitmap: Bitmap): Bitmap =
+        ImageUtils.adaptiveThreshold(bitmap)
+
     // -----------------------------------------------------------------------
     // Y-plane sampling — zero Bitmap allocation
     //
@@ -1593,5 +1609,14 @@ class MainActivity : AppCompatActivity() {
         val left = (width  - cropWidth)  / 2
         val top  = (height - cropHeight) / 2
         return Bitmap.createBitmap(this, left, top, cropWidth, cropHeight)
+    }
+    // In MainActivity.kt — add this override
+    override fun onResume() {
+        super.onResume()
+        val result = MainActivity.pendingOcrResult
+        if (!result.isNullOrBlank()) {
+            MainActivity.pendingOcrResult = null
+            processRawOutput(result!!)
+        }
     }
 }

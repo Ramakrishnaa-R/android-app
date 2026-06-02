@@ -5,7 +5,7 @@ import java.util.*
 import kotlin.math.*
 
 // ---------------------------------------------------------------------------
-// ALIASES — generic ingredient names that map to a brand key
+// ALIASES — generic ingredient names that map to a brand
 // Key   = first pure-alpha token of the DB medicine name (≥4 chars, uppercase)
 // Value = list of generic / OCR-variant names for that brand
 // ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "DOLOPAR"    to listOf("PARACETAMOL", "DOLO-650", "DOLO650"),
     "CROCIN"     to listOf("PARACETAMOL", "ACETAMINOPHEN"),
     "CALPOL"     to listOf("PARACETAMOL", "ACETAMINOPHEN"),
-    "AZTOR"      to listOf("ATORVASTATIN", "LIPITOR"),
+    "AZTOR" to listOf("ATORVASTATIN", "ATORVASTATIN CALCIUM", "LIPITOR", "AZTOR20"),
     "ATORVA"     to listOf("ATORVASTATIN"),
     "LIPVAS"     to listOf("ATORVASTATIN"),
     "STORVAS"    to listOf("ATORVASTATIN"),
@@ -33,7 +33,6 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "OMEZ"       to listOf("OMEPRAZOLE", "PANTOPRAZOLE", "RABEPRAZOLE"),
     "PANTOP"     to listOf("PANTOPRAZOLE"),
     "PANTOCID"   to listOf("PANTOPRAZOLE"),
-    "RAZO"       to listOf("RABEPRAZOLE"),
     "CETZINE"    to listOf("CETIRIZINE"),
     "OKACET"     to listOf("CETIRIZINE"),
     "ALERID"     to listOf("CETIRIZINE"),
@@ -42,9 +41,82 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "MOXIKIND"   to listOf("AMOXICILLIN", "AMOXYCILLIN", "CLAVULANATE"),
     "AZEE"       to listOf("AZITHROMYCIN"),
     "AZITHRAL"   to listOf("AZITHROMYCIN"),
+    "RAZO"       to listOf("RABEPRAZOLE", "ROZO"),
+    "RABELOC"    to listOf("RABEPRAZOLE"),
+    "RABLET"     to listOf("RABEPRAZOLE"),
     "ALKALIZER"  to listOf("ALKAZAR"),
     "ALKOF"      to listOf("COFGELS", "COFGEL"),
 )
+
+private val OCR_WORD_CORRECTIONS = mapOf(
+    // Tablet corruptions
+    "TOBLET" to "TABLET", "TOBLETS" to "TABLET", "TOHLET" to "TABLET",
+    "TOHLETS" to "TABLET", "TABLST" to "TABLET", "TABIET" to "TABLET",
+    "TABTET" to "TABLET", "TABLEL" to "TABLET", "TABT" to "TABLET",
+    "TABLEIS" to "TABLET", "TAOLETS" to "TABLET", "TUBLET" to "TABLET",
+    "TAHLOT" to "TABLET", "TATIET" to "TABLET", "TATLET" to "TABLET",
+    "TABLAT" to "TABLET", "TATLELS" to "TABLET", "ABLET" to "TABLET",
+    "ABIET" to "TABLET", "ABLST" to "TABLET", "LOBLETS" to "TABLETS",
+    "YABLETS" to "TABLETS", "TAHLETS" to "TABLETS", "TEBLET" to "TABLET",
+    "TEBLETS" to "TABLETS",
+
+    // Uncoated corruptions
+    "UNCOETED" to "UNCOATED", "UNCOATOD" to "UNCOATED", "UNCOABED" to "UNCOATED",
+    "UNCOTD" to "UNCOATED", "UNCOTED" to "UNCOATED", "UNCOATD" to "UNCOATED",
+    "UNCCATOD" to "UNCOATED", "UNCOABAD" to "UNCOATED", "UNCOSTED" to "UNCOATED",
+    // Contains corruptions
+    "CONTALNS" to "CONTAINS", "CONTALIS" to "CONTAINS", "CONTSLIS" to "CONTAINS",
+    "CONTANS" to "CONTAINS", "CONTAIS" to "CONTAINS", "OONTALNS" to "CONTAINS",
+    "OONTAINS" to "CONTAINS", "OONTALNA" to "CONTAINS", "COSTALNS" to "CONTAINS",
+    "CANTAINS" to "CONTAINS", "CUNTEINS" to "CONTAINS", "COTINS" to "CONTAINS",
+    "COALNS" to "CONTAINS", "RONTAINS" to "CONTAINS", "ONTEINS" to "CONTAINS",
+    "OORTANS" to "CONTAINS", "ORTALNS" to "CONTAINS", "CORTALNS" to "CONTAINS",
+    // Storage/Store corruptions
+    "STORIG" to "STORAGE", "STORS" to "STORE", "STOR" to "STORE",
+    // Directed/Physician corruptions
+    "DIRECTOD" to "DIRECTED", "DIRSCTED" to "DIRECTED", "DIRCCTCD" to "DIRECTED",
+    "DIRCTEC" to "DIRECTED", "DIRECTC" to "DIRECTED", "DRECTED" to "DIRECTED",
+    "PHRGSCAN" to "PHYSICIAN", "PRYSCIAN" to "PHYSICIAN", "PHYSCIAN" to "PHYSICIAN",
+    "PHYSTCIAN" to "PHYSICIAN",
+    // Keep/Children corruptions
+    "KEOP" to "KEEP", "KEAP" to "KEEP", "KOEP" to "KEEP",
+    "CHLDREN" to "CHILDREN", "CHLLDREN" to "CHILDREN", "CHLOREN" to "CHILDREN",
+    "CHLDRAN" to "CHILDREN", "CHLLDRAN" to "CHILDREN",
+    // Protect/Light/Moisture corruptions
+    "PROTEOT" to "PROTECT", "PROT" to "PROTECT",
+    "LLGHT" to "LIGHT", "LGHT" to "LIGHT",
+    "MOLSTURE" to "MOISTURE", "NOLSTURE" to "MOISTURE", "MOLSTUE" to "MOISTURE",
+    "MOSTURE" to "MOISTURE", "NOLSTUE" to "MOISTURE",
+    // Dosage corruptions
+    "DOSAGA" to "DOSAGE", "DOSAGS0" to "DOSAGE", "DOSAC" to "DOSAGE",
+    "DOSSGE" to "DOSAGE", "DOSAYE" to "DOSAGE",
+    // Medicine corruptions
+    "MEDLCINE" to "MEDICINE", "MODICINE" to "MEDICINE",
+    // Registered corruptions
+    "BEGISTEED" to "REGISTERED", "REGISTSRO" to "REGISTERED",
+    "BEGISLERD" to "REGISTERED", "OBGISTARD" to "REGISTERED",
+    "REGISTERE" to "REGISTERED", "REGSTERED" to "REGISTERED",
+    // Analgesic
+    "ANALGESC" to "ANALGESIC", "ANALGESLC" to "ANALGESIC",
+    // Place/Below
+    "PLCE" to "PLACE", "PLICO" to "PLACE", "PLICE" to "PLACE",
+    "BALOW" to "BELOW", "BEOW" to "BELOW",
+    "DELOO" to "DOLO", "DELO" to "DOLO", "DOLO0" to "DOLO",
+    "POLOGS" to "DOLO", "POLO" to "DOLO", "DOLE" to "DOLO",
+    "DOLS" to "DOLO", "DOLG" to "DOLO", "DOLB" to "DOLO",
+    "DYLO" to "DOLO",
+)
+
+private val VOWELS = setOf('A', 'E', 'I', 'O', 'U')
+
+private fun isGibberish(token: String): Boolean {
+    if (token.length < 4) return true
+    val vowelCount = token.count { it in VOWELS }
+    val vowelRatio = vowelCount.toDouble() / token.length
+    // Real words have at least 15% vowels
+    // "TBLTS", "MFGD", "RQZX" etc. are gibberish
+    return vowelRatio < 0.15
+}
 
 // ---------------------------------------------------------------------------
 // STOPWORDS — tokens with zero brand-identity signal
@@ -70,11 +142,28 @@ private val STOPWORDS = setOf(
     "INDIA", "LTD", "PVT", "LIMITED",
     "PHARMA", "PHARMACEUTICALS", "LABORATORIES", "LABS",
     "MADE", "MANUFACTURED", "MFG", "REGD", "TRADE", "MARK",
-    "RX", "TION", "ABLE"
+    "RX", "TION", "ABLE", "ANALGESIC", "ANALGESICS", "ANTIPYRETIC",
+    "BELOW", "COATED", "UNCOATED",
+    "COLOUR", "COLOR", "COLOURS", "COLORS",
+    "CONTAIN", "CONTAINS",
+    "DOSAGE", "DOSE", "DOSING",
+    "EACH", "EVERY", "EXCEEDING",
+    "EXCIPIENTS", "FERRIC", "FILM", "BILAYERED",
+    "KEEP", "LAKE", "LIGHT", "MEDICINE", "MOISTURE",
+    "OXIDE", "PHYSICIAN", "PLACE", "PONCEAU",
+    "PROTECT", "REACH", "REGISTERED", "RELEASE",
+    "SODIUM", "STORAGE", "STORE", "SUSTAINED",
+    "TAKE", "TAKING", "TEMPERATURE", "TITANIUM",
+    "TRADE", "WARNING", "INTERVAL", "DAILY",
+    "APEX", "SERDIA", "WALUJ", "MUMBAI", "DELHI", "CHENNAI"
 )
 
-private val CHAR_FIXES = mapOf('$' to 'S', '@' to 'A', '!' to 'I', '|' to 'I')
-
+val CHAR_FIXES = mapOf(
+    '$' to 'S', '@' to 'A', '!' to 'I', '|' to 'I',
+    '0' to 'O', '1' to 'I', '2' to 'Z', '3' to 'E',
+    '4' to 'A', '5' to 'S', '6' to 'G', '7' to 'T',
+    '8' to 'B', '9' to 'G'
+)
 // ===========================================================================
 // PrecomputedMedicine — all expensive fields computed ONCE at startup
 // instead of re-computing on every scan for every medicine
@@ -157,14 +246,12 @@ object Matcher {
         Log.d("MATCHER", "========== MATCHING START ==========")
 
         val database = categoryFilter?.let { filter ->
-            // Avoid building a name set every scan; use medicine object identity instead.
-            // (MedicineRepository returns the same Medicine instances used in precomputedDb.)
             val allowed = MedicineRepository.getByCategoryFilter(filter).toHashSet()
             precomputedDb.filter { it.medicine in allowed }
         } ?: precomputedDb
 
-        // --- Input processing ---
-        val normalizedInput = normalize(rawInput)
+        val inputNumbers = extractNumbers(rawInput)
+        val normalizedInput = preprocessInput(rawInput)
 
         if (normalizedInput.length < 3) return emptyList()
 
@@ -192,7 +279,7 @@ object Matcher {
         //   - We keep a generous top-K (300) to avoid missing any real match
         //   - This reduces Phase 2 work from 8500 → ~300 medicines
         // ===================================================================
-        val CANDIDATE_LIMIT = 300
+        val candidateLimit  = 300
 
         data class BigramCandidate(val precomp: PrecomputedMedicine, val bigramScore: Double)
 
@@ -215,7 +302,7 @@ object Matcher {
             // cannot possibly score ≥55 in Phase 2 (empirically tuned)
             .filter { it.bigramScore >= 3.0 }
             .sortedByDescending { it.bigramScore }
-            .take(CANDIDATE_LIMIT)
+            .take(candidateLimit )
             .toList()
 
         Log.d("MATCHER", "Phase 1: ${candidates.size} candidates from ${precomputedDb.size} medicines")
@@ -223,7 +310,6 @@ object Matcher {
         // ===================================================================
         // PHASE 2 — Full Levenshtein scoring on candidates only
         // ===================================================================
-        val inputNumbers = extractNumbers(rawInput)
         val results = candidates
             .map { candidate ->
                 scoreMedicine(
@@ -234,7 +320,7 @@ object Matcher {
                     inputNumbers  = inputNumbers
                 )
             }
-            .filter  { it.score >= 55.0 }
+            .filter  { it.score >= 50.0 }
             .sortedByDescending { it.score }
             .distinctBy { it.medicine.name }
             .take(maxResults)
@@ -246,15 +332,14 @@ object Matcher {
         return results
     }
 
-    /** Standardizes raw OCR string into a clean uppercase comparison string. */
-    fun normalize(text: String): String {
-        val clean = lightClean(text)
-        val fixed = applyCharFixes(clean)
-        return fixed.uppercase(Locale.ROOT)
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
+    /** UI display + same preprocessing used for matching. */
+    fun normalize(text: String): String = preprocessInput(text)
 
+    fun debugInput(raw: String): String {
+        val preprocessed = preprocessInput(raw)
+        val numbers = extractNumbers(raw)
+        return "PREPROCESS='$preprocessed' NUMBERS=$numbers"
+    }
 
     // =======================================================================
     // SCORING — only called on ~300 candidates, not all 8500
@@ -355,19 +440,58 @@ object Matcher {
         // 2. NUMBER MATCH / MISMATCH
         // ===================================================================
         val commonNumbers = inputNumbers.intersect(medNumbers)
+        val partialNumberMatch = inputNumbers.any { inp ->
+            medNumbers.any { med -> med.startsWith(inp) || inp.startsWith(med) }
+        }
         when {
-            inputNumbers.isNotEmpty() && medNumbers.isNotEmpty() && commonNumbers.isNotEmpty() -> {
+            commonNumbers.isNotEmpty() -> {
                 score += 35.0
                 reasons.add("NUM_MATCH($commonNumbers)")
             }
-            inputNumbers.isNotEmpty() && medNumbers.isNotEmpty() && commonNumbers.isEmpty() -> {
-                score -= 50.0
+            partialNumberMatch -> {
+                score += 15.0
+                reasons.add("NUM_PARTIAL_MATCH")
+            }
+            inputNumbers.isNotEmpty() && medNumbers.isNotEmpty() -> {
+                score -= 25.0
                 reasons.add("NUM_MISMATCH(in=$inputNumbers,med=$medNumbers)")
             }
             inputNumbers.isNotEmpty() && medNumbers.isEmpty() -> {
                 score -= 10.0
                 reasons.add("NUM_ORPHAN")
             }
+        }
+
+        // =========================
+        // DOSAGE SUFFIX MATCHING
+        // =========================
+
+
+        val inputSuffixes =
+            extractDosageSuffixes(
+                inputTokens.joinToString(" ")
+            )
+
+        val medSuffixes =
+            extractDosageSuffixes(
+                precomp.medNameRaw
+            )
+
+        val commonSuffixes =
+            inputSuffixes.intersect(medSuffixes)
+
+        if (commonSuffixes.isNotEmpty()) {
+
+            score += commonSuffixes.size * 12
+
+            reasons.add(
+                "DOSAGE_SUFFIX:$commonSuffixes"
+            )
+
+            Log.d(
+                "DOSAGE_SUFFIX",
+                "Matched suffixes: $commonSuffixes"
+            )
         }
 
         // ===================================================================
@@ -440,14 +564,32 @@ object Matcher {
         else               -> 2.0
     }
 
-    private fun lightClean(text: String): String =
-        text.replace(Regex("[^A-Za-z0-9 ]"), " ")
-            .replace(Regex("\\s+"), " ").trim()
-
-    private fun applyCharFixes(text: String): String {
-        val sb = StringBuilder(text.length)
-        for (ch in text) sb.append(CHAR_FIXES[ch] ?: ch)
-        return sb.toString()
+    private fun preprocessInput(rawInput: String): String {
+        return rawInput
+            .uppercase(Locale.ROOT)
+            .map { CHAR_FIXES[it] ?: it }
+            .joinToString("")
+            .split(Regex("\\s+"))
+            .flatMap { token ->
+                // Split on hyphen FIRST before stripping
+                // "Dolo-650" → ["DOLO", "650"]
+                // "Polo-6S0" → ["POLO", "6S0"] → ["POLO", "SO"] → ["POLO"] + number "6"
+                token.split("-")
+            }
+            .flatMap { token ->
+                val clean = token.replace(Regex("[^A-Z0-9]"), "")
+                val corrected = OCR_WORD_CORRECTIONS[clean] ?: clean
+                // Split at letter/digit boundary
+                Regex("(?<=[A-Z])(?=[0-9])|(?<=[0-9])(?=[A-Z])").split(corrected)
+                    .filter { it.isNotEmpty() }
+            }
+            .filter { token ->
+                token.length >= 3 &&
+                        !token.all { it.isDigit() } &&
+                        token !in STOPWORDS &&
+                        !isGibberish(token)
+            }
+            .joinToString(" ")
     }
 
     private fun extractNumbers(text: String): Set<String> =
@@ -455,12 +597,44 @@ object Matcher {
 
     private fun tokenize(text: String): List<String> =
         text.uppercase(Locale.ROOT).split(" ")
-            .map { it.trim() }
+            .map { it.trim().trimStart(')', '(', '-', '.', ',', '*', '}', '{') }  // ← add this
             .filter { token ->
-                token.length >= 4 &&
+                token.length >= 3 &&   // ← changed from 4 to 3
                         token !in STOPWORDS &&
                         !token.all { it.isDigit() }
             }
+
+    private fun extractDosageSuffixes(
+        text: String
+    ): Set<String> {
+
+        val suffixes = setOf(
+            "MG",
+            "ML",
+            "MCG",
+            "SR",
+            "ER",
+            "CR",
+            "XL",
+            "OD",
+            "TAB",
+            "CAP",
+            "DT",
+            "DS",
+            "FORTE",
+            "PLUS",
+            "IV",
+            "IM"
+        )
+
+        return text
+            .uppercase()
+            .split(Regex("[^A-Z0-9]+"))
+            .filter {
+                it in suffixes
+            }
+            .toSet()
+    }
 
     // OPTIMIZATION 5: early-exit Levenshtein
     // If strings differ in length by more than maxDist, return immediately
