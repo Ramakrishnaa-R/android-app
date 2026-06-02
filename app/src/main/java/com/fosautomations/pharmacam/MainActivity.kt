@@ -146,6 +146,7 @@ class MainActivity : AppCompatActivity() {
 
             setupUI()
             setupData()
+            ScanDebugImageSaver.logWhereToFind(this)
             binding.previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             requestRequiredPermissions()
             startAutoReconnect()
@@ -281,7 +282,7 @@ class MainActivity : AppCompatActivity() {
     //     NV21 → JPEG-encode → JPEG-decode roundtrip (was 3 extra allocs)
     //  3. Single rotation pass (original double-rotated: toDetectorBitmap
     //     already rotated, then the let-block rotated again)
-    //  4. LabelOcrHelper.cropBrandRegion + prepareForOcr + line-scored text
+    //  4. LabelOcrHelper 1:1 + 3:1 center crops → prepareForOcr → line-scored text
     // =======================================================================
     /** Focus briefly, then take the still — improves sharpness on real devices. */
     private fun requestShutterCapture() {
@@ -360,7 +361,13 @@ class MainActivity : AppCompatActivity() {
                         }
 
                         scanStartTime = System.currentTimeMillis()
-                        runLabelOcrFromCapture(bitmap, fromShutter = true)
+                        val debugSaves = mutableListOf<ScanDebugImageSaver.SavedCapture>()
+                        ScanDebugImageSaver.saveCapture(
+                            this@MainActivity,
+                            bitmap,
+                            "full"
+                        )?.let { debugSaves.add(it) }
+                        runLabelOcrFromCapture(bitmap, fromShutter = true, debugSaves)
 
                     } finally {
                         imageProxy.close()
@@ -404,11 +411,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Two crops (center + brand band), each with enhance + optional binarized pass.
+     * OCR on square (1:1) + wide (3:1) crops; each with enhance + optional binarized pass.
      */
     private fun runLabelOcrFromCapture(
         fullBitmap: Bitmap,
         fromShutter: Boolean,
+        debugSaves: MutableList<ScanDebugImageSaver.SavedCapture> = mutableListOf(),
         onFinished: (() -> Unit)? = null
     ) {
         matchingScope.launch {
@@ -419,22 +427,39 @@ class MainActivity : AppCompatActivity() {
                     binding.statusText.setTextColor("#FF9800".toColorInt())
                 }
 
-                val centerCrop = LabelOcrHelper.cropCenterRegion(fullBitmap)
-                val brandCrop = LabelOcrHelper.cropBrandRegion(fullBitmap)
+                val squareCrop = LabelOcrHelper.cropCenterSquare(fullBitmap)
+                val wideCrop = LabelOcrHelper.cropCenterWide3x1(fullBitmap)
+                if (ScanDebugImageSaver.ENABLED) {
+                    withContext(Dispatchers.IO) {
+                        ScanDebugImageSaver.saveCapture(
+                            this@MainActivity,
+                            squareCrop,
+                            "crop_1x1"
+                        )?.let { debugSaves.add(it) }
+                        ScanDebugImageSaver.saveCapture(
+                            this@MainActivity,
+                            wideCrop,
+                            "crop_3x1"
+                        )?.let { debugSaves.add(it) }
+                    }
+                }
                 fullBitmap.recycle()
 
                 Log.d(
                     TAG,
-                    "OCR crops: center=${centerCrop.width}x${centerCrop.height} " +
-                        "brand=${brandCrop.width}x${brandCrop.height}"
+                    "OCR crops: 1x1=${squareCrop.width}x${squareCrop.height} " +
+                        "3x1=${wideCrop.width}x${wideCrop.height}"
                 )
 
-                val centerDeferred = async(Dispatchers.Default) { recognizeCrop(centerCrop) }
-                val brandDeferred = async(Dispatchers.Default) { recognizeCrop(brandCrop) }
-                val best = LabelOcrHelper.pickBest(centerDeferred.await(), brandDeferred.await())
+                val squareDeferred = async(Dispatchers.Default) { recognizeCrop(squareCrop) }
+                val wideDeferred = async(Dispatchers.Default) { recognizeCrop(wideCrop) }
+                val best = LabelOcrHelper.pickBest(squareDeferred.await(), wideDeferred.await())
 
                 withContext(Dispatchers.Main) {
                     binding.loader.visibility = View.GONE
+                    if (fromShutter && debugSaves.isNotEmpty()) {
+                        ScanDebugImageSaver.showSavedToast(this@MainActivity, debugSaves)
+                    }
                     deliverOcrResult(best, fromShutter)
                 }
             } catch (e: Exception) {
@@ -936,10 +961,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** UI-only — does not change matching input. */
+    private fun normalizationStatusLine(normalized: String, search: String, extra: String? = null): String {
+        val base = "Normalized: $normalized | Search: $search"
+        return if (extra.isNullOrBlank()) base else "$base | $extra"
+    }
+
     private fun processRawOutput(text: String) {
         lastOcrRaw = text
         Log.d("MATCHER_DEBUG", "processRawOutput called with: '$text'")
+
+        // Display only — matching still uses raw OCR via MedicineNameResolver.resolve(text, …)
+        val normalized = Matcher.normalize(text)
+        val searchQuery = MedicineNameResolver.buildSearchQuery(text)
+
         runOnUiThread {
+            binding.statusText.text = normalizationStatusLine(normalized, searchQuery)
+            binding.statusText.setTextColor("#9E9E9E".toColorInt())
+
             extractVisibleQuantity(text)?.let { quantity ->
                 currentVisiblePackQuantity = quantity
                 if (binding.qtyToggle.isChecked && currentPillCount == null) {
@@ -956,12 +995,12 @@ class MainActivity : AppCompatActivity() {
             val scanTime = System.currentTimeMillis() - scanStartTime
 
             logScanMetrics(
-                ocr        = resolved.searchQuery.ifBlank { text },
-                topMatch   = resolved.medicine?.name ?: "NONE",
+                ocr = resolved.searchQuery.ifBlank { text },
+                topMatch = resolved.medicine?.name ?: "NONE",
                 confidence = resolved.score.toInt(),
-                blurry     = lastBlurStatus,
-                glare      = lastGlareStatus,
-                timeMs     = scanTime
+                blurry = lastBlurStatus,
+                glare = lastGlareStatus,
+                timeMs = scanTime
             )
 
             withContext(Dispatchers.Main) {
@@ -969,7 +1008,10 @@ class MainActivity : AppCompatActivity() {
                 val matches = resolved.alternatives
                 if (matches.isEmpty()) {
                     Log.e(TAG, "MATCH: no medicines for query '${resolved.searchQuery}'")
-                    binding.statusText.text = "No match in medicines.json"
+                    binding.statusText.text = normalizationStatusLine(
+                        normalized,
+                        resolved.searchQuery.ifBlank { searchQuery }
+                    )
                     binding.resultTextView.text = getString(R.string.no_match_instruction)
                     binding.resultTextView.setTextColor("#F44336".toColorInt())
                     Toast.makeText(this@MainActivity, "Not in your medicine list", Toast.LENGTH_LONG).show()
@@ -983,18 +1025,25 @@ class MainActivity : AppCompatActivity() {
                     "MATCH: '${resolved.searchQuery}' → ${top.medicine.name} (${top.score.toInt()}%)"
                 )
 
+                binding.statusText.text = normalizationStatusLine(
+                    normalized,
+                    resolved.searchQuery,
+                    extra = "Found: ${top.medicine.name}"
+                )
+                binding.statusText.setTextColor("#4CAF50".toColorInt())
+
                 if (MedicineNameResolver.shouldAutoPick(resolved)) {
                     binding.top3Container.visibility = View.GONE
                     onMedicineDetected(top.medicine)
-                    Toast.makeText(
-                        this@MainActivity,
-                        top.medicine.name,
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    Toast.makeText(this@MainActivity, top.medicine.name, Toast.LENGTH_SHORT).show()
                 } else {
                     binding.resultTextView.text = top.medicine.name
                     binding.resultTextView.setTextColor("#4CAF50".toColorInt())
-                    binding.statusText.text = getString(R.string.select_match_instruction)
+                    binding.statusText.text = normalizationStatusLine(
+                        normalized,
+                        resolved.searchQuery,
+                        extra = getString(R.string.select_match_instruction)
+                    )
                     showSuggestionsUI(matches)
                 }
             }
@@ -1453,7 +1502,7 @@ class MainActivity : AppCompatActivity() {
     // Y-plane sampling — zero Bitmap allocation
     //
     // Both functions read directly from the YUV_420_888 luminance plane buffer.
-    // The sampled ROI matches centerCrop(0.72f, 0.32f): x∈[14%,86%], y∈[34%,66%].
+    // The sampled ROI matches LabelOcrHelper center 1:1 square (same as OCR crop).
     // A try/catch makes both safe on devices that return JPEG-format captures
     // (planes[0] would contain JPEG bytes; the function returns false harmlessly).
     // -----------------------------------------------------------------------
@@ -1463,8 +1512,8 @@ class MainActivity : AppCompatActivity() {
             val buf    = planes[0].buffer
             val stride = planes[0].rowStride
             val w = width; val h = height
-            val x0 = (w * 0.14f).toInt(); val x1 = (w * 0.86f).toInt()
-            val y0 = (h * 0.34f).toInt(); val y1 = (h * 0.66f).toInt()
+            val roi = LabelOcrHelper.centerSquareRoi(w, h)
+            val x0 = roi[0]; val y0 = roi[1]; val x1 = roi[2]; val y1 = roi[3]
             var bright = 0; var total = 0
             var row = y0
             while (row < y1) {
@@ -1485,8 +1534,10 @@ class MainActivity : AppCompatActivity() {
             val buf    = planes[0].buffer
             val stride = planes[0].rowStride
             val w = width; val h = height
-            val x0 = (w * 0.14f).toInt() + 1; val x1 = (w * 0.86f).toInt()
-            val y0 = (h * 0.34f).toInt() + 1; val y1 = (h * 0.66f).toInt()
+            val roi = LabelOcrHelper.centerSquareRoi(w, h)
+            val x0 = (roi[0] + 1).coerceAtMost(roi[2] - 1)
+            val y0 = (roi[1] + 1).coerceAtMost(roi[3] - 1)
+            val x1 = roi[2]; val y1 = roi[3]
             var diffSum = 0L; var count = 0
             var row = y0
             while (row < y1) {
@@ -1511,10 +1562,11 @@ class MainActivity : AppCompatActivity() {
             val stride = planes[0].rowStride
             val w = width
             val h = height
-            val x0 = (w * 0.14f).toInt() + 1
-            val x1 = (w * 0.86f).toInt()
-            val y0 = (h * 0.34f).toInt() + 1
-            val y1 = (h * 0.66f).toInt()
+            val roi = LabelOcrHelper.centerSquareRoi(w, h)
+            val x0 = (roi[0] + 1).coerceAtMost(roi[2] - 1)
+            val y0 = (roi[1] + 1).coerceAtMost(roi[3] - 1)
+            val x1 = roi[2]
+            val y1 = roi[3]
             var diffSum = 0L
             var count = 0
             var row = y0

@@ -12,6 +12,12 @@ object MedicineScanPipeline {
 
     private const val TAG = "PharmaCam_Scan"
 
+    /**
+     * Safety switch: keep image classification disabled.
+     * When false, [decideCategory] behaves as if no image model exists.
+     */
+    private const val ENABLE_IMAGE_CLASSIFICATION = false
+
     /** Minimum softmax score to trust image top-1. */
     const val IMAGE_SURE_CONFIDENCE = 0.50f
 
@@ -42,10 +48,11 @@ object MedicineScanPipeline {
         image: MedicineCategoryImageClassifier.Prediction?,
         ocrText: String
     ): CategoryDecision {
+        val effectiveImage = if (ENABLE_IMAGE_CLASSIFICATION) image else null
         val ocrCategory = ProductCategoryClassifier.classify(ocrText, ClassificationSource.OCR)
         val ocrUsable = ocrCategory != ProductCategory.OTHER
 
-        if (image == null) {
+        if (effectiveImage == null) {
             Log.i(TAG, "No image model → category from OCR: $ocrCategory")
             return CategoryDecision(
                 category = ocrCategory,
@@ -57,33 +64,33 @@ object MedicineScanPipeline {
             )
         }
 
-        logImagePrediction(image)
+        logImagePrediction(effectiveImage)
 
-        if (isImageSure(image)) {
+        if (isImageSure(effectiveImage)) {
             Log.i(
                 TAG,
-                "Image sure → ${image.category} (${(image.confidence * 100).toInt()}%) " +
+                "Image sure → ${effectiveImage.category} (${(effectiveImage.confidence * 100).toInt()}%) " +
                     "— fuzzy match in this group only"
             )
             return CategoryDecision(
-                category = image.category,
+                category = effectiveImage.category,
                 source = "image_sure",
                 fromImage = true,
                 applyCategoryFilter = true,
-                imageConfidence = image.confidence,
+                imageConfidence = effectiveImage.confidence,
                 ocrTextCategory = ocrCategory
             )
         }
 
         if (ocrUsable) {
             val reason = when {
-                image.category == ProductCategory.OTHER -> "image_other"
-                image.confidence < IMAGE_SURE_CONFIDENCE -> "image_low_conf"
+                effectiveImage.category == ProductCategory.OTHER -> "image_other"
+                effectiveImage.confidence < IMAGE_SURE_CONFIDENCE -> "image_low_conf"
                 else -> "image_ambiguous"
             }
             Log.i(
                 TAG,
-                "Image not sure ($reason: ${image.category} ${(image.confidence * 100).toInt()}%) " +
+                "Image not sure ($reason: ${effectiveImage.category} ${(effectiveImage.confidence * 100).toInt()}%) " +
                     "→ category from OCR: $ocrCategory"
             )
             return CategoryDecision(
@@ -91,19 +98,19 @@ object MedicineScanPipeline {
                 source = "ocr_$reason",
                 fromImage = false,
                 applyCategoryFilter = true,
-                imageConfidence = image.confidence,
+                imageConfidence = effectiveImage.confidence,
                 ocrTextCategory = ocrCategory
             )
         }
 
-        if (image.category != ProductCategory.OTHER && image.confidence >= 0.30f) {
-            Log.i(TAG, "No OCR type word → weak image category ${image.category}")
+        if (effectiveImage.category != ProductCategory.OTHER && effectiveImage.confidence >= 0.30f) {
+            Log.i(TAG, "No OCR type word → weak image category ${effectiveImage.category}")
             return CategoryDecision(
-                category = image.category,
+                category = effectiveImage.category,
                 source = "image_weak_no_ocr_type",
                 fromImage = true,
                 applyCategoryFilter = true,
-                imageConfidence = image.confidence,
+                imageConfidence = effectiveImage.confidence,
                 ocrTextCategory = ocrCategory
             )
         }
@@ -114,7 +121,7 @@ object MedicineScanPipeline {
             source = "no_category_filter",
             fromImage = false,
             applyCategoryFilter = false,
-            imageConfidence = image.confidence,
+            imageConfidence = effectiveImage.confidence,
             ocrTextCategory = ocrCategory
         )
     }
@@ -155,7 +162,7 @@ object MedicineScanPipeline {
         maxResults: Int = 3,
         allowFullDatabaseFallback: Boolean = true
     ): List<Matcher.ScoredMatch> {
-        var matches = Matcher.findTopMatches(
+        val matches = Matcher.findTopMatches(
             request.ocrText,
             blacklist,
             maxResults,

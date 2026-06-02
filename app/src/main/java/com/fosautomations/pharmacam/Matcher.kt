@@ -157,16 +157,14 @@ object Matcher {
         Log.d("MATCHER", "========== MATCHING START ==========")
 
         val database = categoryFilter?.let { filter ->
-            val filterNames = MedicineRepository.getByCategoryFilter(filter).map { it.name }.toSet()
-            precomputedDb.filter { it.medicine.name in filterNames }
+            // Avoid building a name set every scan; use medicine object identity instead.
+            // (MedicineRepository returns the same Medicine instances used in precomputedDb.)
+            val allowed = MedicineRepository.getByCategoryFilter(filter).toHashSet()
+            precomputedDb.filter { it.medicine in allowed }
         } ?: precomputedDb
 
-        // --- Input processing (same as before) ---
-        val inputNumbers     = extractNumbers(rawInput)
-        val cleanInput       = lightClean(rawInput)
-        val fixedInput       = applyCharFixes(cleanInput)
-        val normalizedInput  = fixedInput.uppercase(Locale.ROOT)
-            .replace(Regex("\\s+"), " ").trim()
+        // --- Input processing ---
+        val normalizedInput = normalize(rawInput)
 
         if (normalizedInput.length < 3) return emptyList()
 
@@ -225,6 +223,7 @@ object Matcher {
         // ===================================================================
         // PHASE 2 — Full Levenshtein scoring on candidates only
         // ===================================================================
+        val inputNumbers = extractNumbers(rawInput)
         val results = candidates
             .map { candidate ->
                 scoreMedicine(
@@ -246,6 +245,16 @@ object Matcher {
 
         return results
     }
+
+    /** Standardizes raw OCR string into a clean uppercase comparison string. */
+    fun normalize(text: String): String {
+        val clean = lightClean(text)
+        val fixed = applyCharFixes(clean)
+        return fixed.uppercase(Locale.ROOT)
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
 
     // =======================================================================
     // SCORING — only called on ~300 candidates, not all 8500

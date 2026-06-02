@@ -90,13 +90,48 @@ object LabelOcrHelper {
 
     private data class ScoredLine(val line: String, val score: Int)
 
-    /** Brand band on full capture (wider than the old 16% strip). */
+    /** Wide strip: width = 3 × height (horizontal brand lines). */
+    private const val WIDE_ASPECT_WIDTH = 3
+    private const val WIDE_ASPECT_HEIGHT = 1
+
+    /**
+     * Centered 1:1 square — matches the on-screen scan box.
+     * Primary OCR crop for boxes, blister strips, bottles in frame.
+     */
+    fun cropCenterSquare(bitmap: Bitmap): Bitmap {
+        val side = min(bitmap.width, bitmap.height)
+        val left = (bitmap.width - side) / 2
+        val top = (bitmap.height - side) / 2
+        return Bitmap.createBitmap(bitmap, left, top, side, side)
+    }
+
+    /**
+     * Centered 3:1 wide rectangle.
+     * Secondary crop for horizontal brand text (ALKOF COFGELS, etc.).
+     */
+    fun cropCenterWide3x1(bitmap: Bitmap): Bitmap {
+        val cropH = min(bitmap.height, bitmap.width / WIDE_ASPECT_WIDTH).coerceAtLeast(1)
+        val cropW = (cropH * WIDE_ASPECT_WIDTH).coerceAtMost(bitmap.width)
+        val left = (bitmap.width - cropW) / 2
+        val top = (bitmap.height - cropH) / 2
+        return Bitmap.createBitmap(bitmap, left, top, cropW, cropH)
+    }
+
+    /** Brand band on full capture (fractional crop — optional extra pass). */
     fun cropBrandRegion(bitmap: Bitmap): Bitmap =
         cropFraction(bitmap, CROP_LEFT_FRAC, CROP_TOP_FRAC, CROP_WIDTH_FRAC, CROP_HEIGHT_FRAC)
 
-    /** Most of the frame — matches what the user lines up in the scan box. */
+    /** Large center fractional crop (optional extra pass). */
     fun cropCenterRegion(bitmap: Bitmap): Bitmap =
         cropFraction(bitmap, CENTER_LEFT_FRAC, CENTER_TOP_FRAC, CENTER_WIDTH_FRAC, CENTER_HEIGHT_FRAC)
+
+    /** Pixel bounds for preview quality checks (same as [cropCenterSquare]). */
+    fun centerSquareRoi(width: Int, height: Int): IntArray {
+        val side = min(width, height)
+        val left = (width - side) / 2
+        val top = (height - side) / 2
+        return intArrayOf(left, top, left + side, top + side)
+    }
 
     private fun cropFraction(
         bitmap: Bitmap,
