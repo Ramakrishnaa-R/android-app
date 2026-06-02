@@ -32,7 +32,6 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "OMEZ"       to listOf("OMEPRAZOLE", "PANTOPRAZOLE", "RABEPRAZOLE"),
     "PANTOP"     to listOf("PANTOPRAZOLE"),
     "PANTOCID"   to listOf("PANTOPRAZOLE"),
-    "RAZO"       to listOf("RABEPRAZOLE"),
     "CETZINE"    to listOf("CETIRIZINE"),
     "OKACET"     to listOf("CETIRIZINE"),
     "ALERID"     to listOf("CETIRIZINE"),
@@ -156,8 +155,12 @@ private val STOPWORDS = setOf(
     "APEX", "SERDIA", "WALUJ", "MUMBAI", "DELHI", "CHENNAI"
 )
 
-private val CHAR_FIXES = mapOf('$' to 'S', '@' to 'A', '!' to 'I', '|' to 'I', '0' to 'O', '1' to 'I', '5' to 'S', '6' to 'G', '8' to 'B', '3' to 'E', '7' to 'T')
-
+val CHAR_FIXES = mapOf(
+    '$' to 'S', '@' to 'A', '!' to 'I', '|' to 'I',
+    '0' to 'O', '1' to 'I', '2' to 'Z', '3' to 'E',
+    '4' to 'A', '5' to 'S', '6' to 'G', '7' to 'T',
+    '8' to 'B', '9' to 'G'
+)
 // ===========================================================================
 // PrecomputedMedicine — all expensive fields computed ONCE at startup
 // instead of re-computing on every scan for every medicine

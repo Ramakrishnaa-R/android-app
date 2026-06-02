@@ -3,6 +3,7 @@ package com.fosautomations.pharmacam
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.view.View
+import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -40,28 +41,23 @@ class ImageProcessingActivity : AppCompatActivity() {
     private suspend fun runPipeline(original: Bitmap) {
         val container = findViewById<LinearLayout>(R.id.stepsContainer)
 
-        // Step 1 — Original captured photo
         showStep(container, "📷 Original Capture", original)
         delay(800)
 
-        // Step 2 — Grayscale
         val grayscale = withContext(Dispatchers.Default) {
             ImageUtils.toGrayscale(original)
         }
         showStep(container, "🔲 Grayscale", grayscale)
         delay(800)
 
-        // Step 3 — Remove glare (skip adaptiveThreshold — hurts OCR on foil)
         val noGlare = withContext(Dispatchers.Default) {
             ImageUtils.removeSpecularHighlights(grayscale)
         }
         showStep(container, "✨ Glare Removed — Sent to OCR", noGlare)
         delay(800)
 
-        // Hide loader
         findViewById<ProgressBar>(R.id.loader).visibility = View.GONE
 
-        // Step 4 — Run OCR on noGlare image
         runOCR(noGlare)
     }
 
@@ -70,6 +66,7 @@ class ImageProcessingActivity : AppCompatActivity() {
 
         recognizer.process(inputImage)
             .addOnSuccessListener { visionText ->
+                // Build fullText string from filtered + sorted blocks
                 val fullText = visionText.textBlocks
                     .filter { block ->
                         block.text.any { it.code in 65..122 } // latin only, skip Hindi
@@ -83,9 +80,13 @@ class ImageProcessingActivity : AppCompatActivity() {
 
                 android.util.Log.d("IMAGE_PROCESSING", "OCR TEXT: $fullText")
 
+                runOnUiThread {
+                    val container = findViewById<LinearLayout>(R.id.stepsContainer)
+                    showTextPipeline(container, fullText)
+                }
+
                 if (fullText.length >= 3) {
                     MainActivity.pendingOcrResult = fullText
-                    // REMOVE the finish() that was here
                     runOnUiThread {
                         showmessage("✅ OCR Done — tap Close to continue")
                         findViewById<android.widget.Button>(R.id.btnClose).visibility = View.VISIBLE
@@ -103,9 +104,36 @@ class ImageProcessingActivity : AppCompatActivity() {
                     showmessage("OCR failed — try again")
                 }
             }
-            .addOnCompleteListener { _ ->
+            .addOnCompleteListener {
                 bitmap.recycle()
             }
+    }
+
+    private fun showTextPipeline(container: LinearLayout, rawOcr: String) {
+        showTextStep(container, "📝 Raw OCR", rawOcr)
+
+        val charFixed = rawOcr.uppercase()
+            .map { CHAR_FIXES[it] ?: it }
+            .joinToString("")
+        showTextStep(container, "🔤 Char Fixed (\$→S, 0→O, 2→Z ...)", charFixed)
+
+        val preprocessed = Matcher.debugInput(rawOcr)
+        showTextStep(container, "✅ Sent to Matcher", preprocessed)
+    }
+
+    private fun showTextStep(container: LinearLayout, label: String, text: String) {
+        val stepView = layoutInflater.inflate(R.layout.item_processing_step, container, false)
+        stepView.findViewById<TextView>(R.id.stepLabel).text = label
+        stepView.findViewById<ImageView>(R.id.stepImage).visibility = View.GONE
+        val tv = TextView(this).apply {
+            this.text = text
+            setTextColor(android.graphics.Color.parseColor("#E0E0E0"))
+            textSize = 13f
+            setPadding(16, 8, 16, 8)
+            setBackgroundColor(android.graphics.Color.parseColor("#1E1E1E"))
+        }
+        (stepView as ViewGroup).addView(tv)
+        container.addView(stepView)
     }
 
     private fun showmessage(msg: String) {
