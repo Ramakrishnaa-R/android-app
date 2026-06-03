@@ -44,7 +44,7 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "RAZO"       to listOf("RABEPRAZOLE", "ROZO"),
     "RABELOC"    to listOf("RABEPRAZOLE"),
     "RABLET"     to listOf("RABEPRAZOLE"),
-    "ALKALIZER"  to listOf("ALKAZAR"),
+    "ALKALIZER"  to listOf("ALKAZAR", "ALKAFLOW", "LIAFLOR"),
     "ALKOF"      to listOf("COFGELS", "COFGEL"),
 )
 
@@ -105,6 +105,8 @@ private val OCR_WORD_CORRECTIONS = mapOf(
     "POLOGS" to "DOLO", "POLO" to "DOLO", "DOLE" to "DOLO",
     "DOLS" to "DOLO", "DOLG" to "DOLO", "DOLB" to "DOLO",
     "DYLO" to "DOLO",
+    "ALKAFLOW" to "ALKALIZER",
+    "LIAFLOR" to "ALKALIZER",
 )
 
 private val VOWELS = setOf('A', 'E', 'I', 'O', 'U')
@@ -155,7 +157,8 @@ private val STOPWORDS = setOf(
     "SODIUM", "STORAGE", "STORE", "SUSTAINED",
     "TAKE", "TAKING", "TEMPERATURE", "TITANIUM",
     "TRADE", "WARNING", "INTERVAL", "DAILY",
-    "APEX", "SERDIA", "WALUJ", "MUMBAI", "DELHI", "CHENNAI"
+    "APEX", "SERDIA", "WALUJ", "MUMBAI", "DELHI", "CHENNAI",
+    "STONE", "CUTTER"
 )
 
 val CHAR_FIXES = mapOf(
@@ -251,7 +254,7 @@ object Matcher {
         } ?: precomputedDb
 
         val inputNumbers = extractNumbers(rawInput)
-        val normalizedInput = preprocessInput(rawInput)
+        val normalizedInput = preprocessForMatch(rawInput)
 
         if (normalizedInput.length < 3) return emptyList()
 
@@ -320,7 +323,7 @@ object Matcher {
                     inputNumbers  = inputNumbers
                 )
             }
-            .filter  { it.score >= 50.0 }
+            .filter  { it.score >= 55.0 }
             .sortedByDescending { it.score }
             .distinctBy { it.medicine.name }
             .take(maxResults)
@@ -332,13 +335,30 @@ object Matcher {
         return results
     }
 
-    /** UI display + same preprocessing used for matching. */
-    fun normalize(text: String): String = preprocessInput(text)
+    /**
+     * Readable normalization for UI (previous OCR-IMPROVEMENT-2 style):
+     * strip junk → char fixes → uppercase → collapse spaces.
+     */
+    fun normalize(text: String): String {
+        val clean = text
+            .replace(Regex("[^A-Za-z0-9 \\-]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val fixed = buildString {
+            for (ch in clean) append(CHAR_FIXES[ch] ?: ch)
+        }
+        return fixed.uppercase(Locale.ROOT)
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    /** Aggressive token cleanup used inside [findTopMatches] only. */
+    fun preprocessForMatch(rawInput: String): String = preprocessInput(rawInput)
 
     fun debugInput(raw: String): String {
         val preprocessed = preprocessInput(raw)
         val numbers = extractNumbers(raw)
-        return "PREPROCESS='$preprocessed' NUMBERS=$numbers"
+        return "PREPROCESS='$preprocessed' NUMBERS=$numbers | DISPLAY='${normalize(raw)}'"
     }
 
     // =======================================================================

@@ -2,6 +2,7 @@ package com.fosautomations.pharmacam
 
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -11,26 +12,33 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
 
 /**
- * Rhohit debug screen: image pipeline steps + OCR + string normalization before matcher.
+ * Rhohit debug screen — image pipeline steps only.
+ * Matching uses OCR from [MainActivity] shutter (LabelOcrHelper); this screen never re-OCRs or overwrites it.
  */
 class ImageProcessingActivity : AppCompatActivity() {
 
+    companion object {
+        const val EXTRA_BLACKLIST = "extra_blacklist"
+        const val EXTRA_PRIMARY_OCR = "extra_primary_ocr"
+        const val EXTRA_WIDE_OCR = "extra_wide_ocr"
+    }
+
     private val scope = kotlinx.coroutines.CoroutineScope(
-        Dispatchers.Main + kotlinx.coroutines.SupervisorJob()
+        Dispatchers.Main + kotlinx.coroutines.SupervisorJob() +
+            CoroutineExceptionHandler { _, e ->
+                Log.e("IMAGE_PROCESSING", "Pipeline failed", e)
+                findViewById<Button>(R.id.btnClose)?.visibility = View.VISIBLE
+                showmessage("Error: ${e.message ?: "processing failed"}")
+            }
     )
-    private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,7 +52,7 @@ class ImageProcessingActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnClose).apply {
             visibility = View.GONE
-            setOnClickListener { finish() }
+            setOnClickListener { finishWithResult() }
         }
 
         scope.launch {
@@ -57,14 +65,14 @@ class ImageProcessingActivity : AppCompatActivity() {
 
         showStep(container, "📷 Original Capture (1:1)", original)
         saveDebugStage(original, "debug_original")
-        delay(600)
+        delay(500)
 
         val grayscale = withContext(Dispatchers.Default) {
             ImageUtils.toGrayscale(original)
         }
         showStep(container, "🔲 Grayscale", grayscale)
         saveDebugStage(grayscale, "debug_grayscale")
-        delay(600)
+        delay(500)
 
         val noGlare = withContext(Dispatchers.Default) {
             ImageUtils.removeSpecularHighlights(grayscale)
@@ -72,98 +80,121 @@ class ImageProcessingActivity : AppCompatActivity() {
         if (grayscale !== noGlare) grayscale.recycle()
         showStep(container, "✨ Glare Removed", noGlare)
         saveDebugStage(noGlare, "debug_glare_removed")
-        delay(600)
+        delay(500)
 
         val thresholded = withContext(Dispatchers.Default) {
             ImageUtils.adaptiveThreshold(noGlare)
         }
         showStep(container, "⬛ Adaptive Threshold", thresholded)
         saveDebugStage(thresholded, "debug_adaptive_threshold")
-        delay(600)
+        delay(500)
 
-        val forOcr = withContext(Dispatchers.Default) {
+        val binarized = withContext(Dispatchers.Default) {
             ImageUtils.preprocessForOCR(noGlare)
         }
-        showStep(container, "🔤 Binarized — Sent to OCR", forOcr)
-        saveDebugStage(forOcr, "debug_binarized_ocr")
-        delay(600)
+        showStep(container, "🔤 Binarized (debug view)", binarized)
+        saveDebugStage(binarized, "debug_binarized_ocr")
+        delay(500)
 
         findViewById<ProgressBar>(R.id.loader).visibility = View.GONE
 
-        runOcrAndShowTextPipeline(container, forOcr)
-        if (forOcr !== noGlare) forOcr.recycle()
+        withContext(Dispatchers.IO) {
+            MedicineRepository.loadIfNeeded(this@ImageProcessingActivity)
+        }
+
+        // OCR from MainActivity shutter — not re-run here (Rhohit re-OCR was hurting accuracy).
+        var squareOcr = intent.getStringExtra(EXTRA_PRIMARY_OCR)?.trim()
+            ?: MainActivity.pendingOcrResult?.trim().orEmpty()
+        var wideOcr = intent.getStringExtra(EXTRA_WIDE_OCR)?.trim()
+            ?: MainActivity.pendingWideOcrText?.trim().orEmpty()
+        var waits = 0
+        while (squareOcr.length < 3 && wideOcr.length < 3 && waits < 15) {
+            delay(200)
+            squareOcr = MainActivity.pendingOcrResult?.trim().orEmpty()
+            wideOcr = MainActivity.pendingWideOcrText?.trim().orEmpty()
+            waits++
+        }
+
+        showTextPipeline(container, squareOcr, wideOcr)
+        showMatchResults(container, squareOcr, wideOcr)
+
+        if (squareOcr.length >= 3 || wideOcr.length >= 3) {
+            showmessage("✅ Debug view — tap Close (match uses camera OCR, not this screen)")
+            findViewById<Button>(R.id.btnClose).visibility = View.VISIBLE
+        } else {
+            showmessage("Waiting for OCR from camera… tap Close anyway")
+            findViewById<Button>(R.id.btnClose).visibility = View.VISIBLE
+        }
+
+        if (binarized !== noGlare) binarized.recycle()
         noGlare.recycle()
     }
 
-    private suspend fun runOcrAndShowTextPipeline(container: LinearLayout, ocrBitmap: Bitmap) {
-        val fullText = withContext(Dispatchers.Default) {
-            runMlKitOcr(ocrBitmap)
+    private fun showTextPipeline(container: LinearLayout, squareOcr: String, wideOcr: String) {
+        showTextStep(container, "📝 OCR used for match (1:1 / pickBest)", squareOcr.ifBlank { "(empty)" })
+        if (wideOcr.isNotBlank()) {
+            showTextStep(container, "📝 Wide crop hint (3:1)", wideOcr)
         }
 
-        android.util.Log.d("IMAGE_PROCESSING", "OCR TEXT: $fullText")
-
-        showTextPipeline(container, fullText)
-
-        // Wide 3:1 crop may still be processing in MainActivity
-        repeat(3) {
-            delay(500)
-            val wide = MainActivity.pendingWideOcrText?.trim().orEmpty()
-            if (wide.length >= 3) {
-                showTextStep(container, "📐 Wide crop (3:1) OCR", wide)
-                scrollToBottom()
-                return@repeat
-            }
-        }
-
-        if (fullText.length >= 3) {
-            MainActivity.pendingOcrResult = fullText
-            showmessage("✅ OCR Done — tap Close to continue")
-            findViewById<Button>(R.id.btnClose).visibility = View.VISIBLE
-        } else {
-            showmessage("Nothing readable — move closer")
-            findViewById<Button>(R.id.btnClose).visibility = View.VISIBLE
-        }
-    }
-
-    private suspend fun runMlKitOcr(bitmap: Bitmap): String =
-        suspendCancellableCoroutine { cont ->
-            recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                .addOnSuccessListener { visionText ->
-                    val text = visionText.textBlocks
-                        .filter { block -> block.text.any { it.code in 65..122 } }
-                        .sortedByDescending { block ->
-                            block.lines.maxOfOrNull { it.boundingBox?.height() ?: 0 } ?: 0
-                        }
-                        .take(5)
-                        .joinToString(" ") { it.text.replace("\n", " ") }
-                        .trim()
-                    if (cont.isActive) cont.resume(text)
-                }
-                .addOnFailureListener { e ->
-                    android.util.Log.e("IMAGE_PROCESSING", "OCR failed", e)
-                    if (cont.isActive) cont.resume("")
-                }
-        }
-
-    /** Rhohit text-debug steps (same as his branch). */
-    private fun showTextPipeline(container: LinearLayout, rawOcr: String) {
-        showTextStep(container, "📝 Raw OCR", rawOcr)
-
-        val charFixed = rawOcr.uppercase()
+        val charFixed = squareOcr.uppercase()
             .map { ch -> CHAR_FIXES[ch] ?: ch }
             .joinToString("")
-        showTextStep(container, "🔤 Char Fixed (\$→S, 0→O, 2→Z …)", charFixed)
+        showTextStep(container, "🔤 Char Fixed (\$→S, 0→O, 2→Z …)", charFixed.ifBlank { "(empty)" })
 
-        val normalized = Matcher.normalize(rawOcr)
-        showTextStep(container, "📋 Normalized (matcher)", normalized)
+        val normalized = Matcher.normalize(squareOcr)
+        showTextStep(container, "📋 Normalized (matcher)", normalized.ifBlank { "(empty)" })
 
-        val searchQuery = MedicineNameResolver.buildSearchQuery(rawOcr)
+        val searchQuery = MedicineNameResolver.buildSearchQuery(squareOcr)
+            .ifBlank { MedicineNameResolver.buildSearchQuery(wideOcr) }
         showTextStep(container, "🔎 Search query (resolver)", searchQuery.ifBlank { "(empty)" })
 
-        val matcherDebug = Matcher.debugInput(rawOcr)
+        val matcherDebug = Matcher.debugInput(squareOcr)
         showTextStep(container, "✅ Sent to Matcher", matcherDebug)
 
         scrollToBottom()
+    }
+
+    private fun showMatchResults(container: LinearLayout, squareOcr: String, wideOcr: String) {
+        if (squareOcr.length < 3 && wideOcr.length < 3) {
+            showHighlightStep(container, "💊 Match (medicines.json)", "(no OCR from camera yet)")
+            return
+        }
+        if (!MedicineRepository.isReady()) {
+            showHighlightStep(
+                container,
+                "💊 Match (medicines.json)",
+                "Medicine list not loaded"
+            )
+            return
+        }
+
+        val primary = squareOcr.ifBlank { wideOcr }
+        val blacklist = intent.getStringArrayListExtra(EXTRA_BLACKLIST)?.toSet() ?: emptySet()
+        val resolved = MedicineNameResolver.resolveForScan(primary, wideOcr, blacklist, 5)
+        val query = resolved.searchQuery.ifBlank {
+            MedicineNameResolver.buildSearchQuery(primary)
+        }
+
+        val body = buildString {
+            val top = resolved.medicine
+            if (top != null) {
+                append(top.name)
+                append("\n\nScore: ${resolved.score.toInt()}%")
+                append("\nQuery: $query")
+                if (MedicineNameResolver.shouldAutoPick(resolved)) {
+                    append("\n\nWill auto-select when you tap Close")
+                } else {
+                    append("\n\nTap Close — pick from suggestions if needed")
+                }
+            } else {
+                append("No match in your medicine list")
+                append("\n\nQuery tried: $query")
+            }
+            resolved.alternatives.drop(1).take(3).forEachIndexed { i, m ->
+                append("\n  ${i + 2}. ${m.medicine.name} (${m.score.toInt()}%)")
+            }
+        }
+        showHighlightStep(container, "💊 Match (medicines.json)", body.trim())
     }
 
     private fun showTextStep(container: LinearLayout, label: String, text: String) {
@@ -176,6 +207,22 @@ class ImageProcessingActivity : AppCompatActivity() {
             textSize = 13f
             setPadding(16, 8, 16, 8)
             setBackgroundColor(android.graphics.Color.parseColor("#1E1E1E"))
+        }
+        (stepView as ViewGroup).addView(tv)
+        container.addView(stepView)
+        scrollToBottom()
+    }
+
+    private fun showHighlightStep(container: LinearLayout, label: String, text: String) {
+        val stepView = layoutInflater.inflate(R.layout.item_processing_step, container, false)
+        stepView.findViewById<TextView>(R.id.stepLabel).text = label
+        stepView.findViewById<ImageView>(R.id.stepImage).visibility = View.GONE
+        val tv = TextView(this).apply {
+            this.text = text
+            setTextColor(android.graphics.Color.parseColor("#A5D6A7"))
+            textSize = 15f
+            setPadding(16, 12, 16, 12)
+            setBackgroundColor(android.graphics.Color.parseColor("#1B5E20"))
         }
         (stepView as ViewGroup).addView(tv)
         container.addView(stepView)
@@ -213,10 +260,33 @@ class ImageProcessingActivity : AppCompatActivity() {
         ScanDebugImageSaver.saveCapture(this, bitmap, label)
     }
 
+    private fun finishWithResult() {
+        setResult(
+            RESULT_OK,
+            android.content.Intent().apply {
+                putExtra(
+                    EXTRA_PRIMARY_OCR,
+                    intent.getStringExtra(EXTRA_PRIMARY_OCR)
+                        ?: MainActivity.pendingOcrResult.orEmpty()
+                )
+                putExtra(
+                    EXTRA_WIDE_OCR,
+                    intent.getStringExtra(EXTRA_WIDE_OCR)
+                        ?: MainActivity.pendingWideOcrText.orEmpty()
+                )
+            }
+        )
+        finish()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
-        recognizer.close()
         BitmapHolder.bitmap = null
+    }
+
+    @Deprecated("Deprecated in Android API; keeps hardware Back behavior aligned with Close.")
+    override fun onBackPressed() {
+        finishWithResult()
     }
 }

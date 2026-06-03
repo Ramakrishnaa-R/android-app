@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
         var pendingOcrResult: String? = null
         /** Parallel 3:1 wide-crop OCR while the processing screen is open. */
         var pendingWideOcrText: String? = null
+        private const val REQUEST_IMAGE_PROCESSING = 1201
         // Pre-compiled once at class load — never recompiled per-call
         private val UNIT_QTY_REGEX = Regex(
             """\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b"""
@@ -288,6 +289,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         Log.d(TAG, "SHUTTER: tap (preview blur=$lastBlurStatus glare=$lastGlareStatus)")
+        clearActiveMatchUiForNewScan()
         binding.btnShutter.isEnabled = false
         binding.statusText.text = "Focusing…"
         binding.statusText.setTextColor("#FF9800".toColorInt())
@@ -390,23 +392,46 @@ class MainActivity : AppCompatActivity() {
 
                         pendingWideOcrText = null
                         pendingOcrResult = null
-                        BitmapHolder.bitmap = squareCrop
+
+                        val squareForDebug = squareCrop.copy(Bitmap.Config.ARGB_8888, false)
+                        BitmapHolder.bitmap = squareForDebug
 
                         matchingScope.launch {
-                            val wideText = async(Dispatchers.Default) {
-                                val wideResult = recognizeCrop(wideCrop)
-                                wideResult.fullText.ifBlank { wideResult.matchText }
+                            val squareResult = async(Dispatchers.Default) { recognizeCrop(squareCrop) }
+                            val wideResult = async(Dispatchers.Default) { recognizeCrop(wideCrop) }
+                            val square = squareResult.await()
+                            val wide = wideResult.await()
+                            val best = LabelOcrHelper.pickBest(square, wide)
+                            pendingWideOcrText = wide.fullText.ifBlank { wide.matchText }
+                            val primaryText = best.fullText.ifBlank { best.matchText }
+                            if (primaryText.length >= 3) {
+                                pendingOcrResult = primaryText
                             }
+                            val wideText = pendingWideOcrText.orEmpty()
+
                             withContext(Dispatchers.Main) {
                                 finishCapture()
-                                startActivity(
+                                startActivityForResult(
                                     Intent(
                                         this@MainActivity,
                                         ImageProcessingActivity::class.java
-                                    )
+                                    ).apply {
+                                        putExtra(
+                                            ImageProcessingActivity.EXTRA_PRIMARY_OCR,
+                                            primaryText
+                                        )
+                                        putExtra(
+                                            ImageProcessingActivity.EXTRA_WIDE_OCR,
+                                            wideText
+                                        )
+                                        putStringArrayListExtra(
+                                            ImageProcessingActivity.EXTRA_BLACKLIST,
+                                            ArrayList(blacklist)
+                                        )
+                                    },
+                                    REQUEST_IMAGE_PROCESSING
                                 )
                             }
-                            pendingWideOcrText = wideText.await()
                         }
 
                     } finally {
@@ -433,6 +458,15 @@ class MainActivity : AppCompatActivity() {
         isCapturing = false
         binding.btnShutter.isEnabled = true
         binding.scanBox.setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    private fun clearActiveMatchUiForNewScan() {
+        currentMatch = null
+        latestScanText = null
+        isLocked = false
+        binding.confirmBtn.isEnabled = false
+        binding.top3Choices.removeAllViews()
+        binding.top3Container.visibility = View.GONE
     }
 
     private fun triggerCaptureFocus() {
@@ -1044,20 +1078,22 @@ class MainActivity : AppCompatActivity() {
         return if (extra.isNullOrBlank()) base else "$base | $extra"
     }
 
-    private fun processRawOutput(text: String) {
-        lastOcrRaw = text
-        Log.d("MATCHER_DEBUG", "processRawOutput called with: '$text'")
-        Log.d("MATCHER_DEBUG", Matcher.debugInput(text))
+    private fun processScanResult(primaryOcr: String, hintOcr: String?) {
+        if (primaryOcr.length < 3) return
+        lastOcrRaw = primaryOcr
+        Log.d("MATCHER_DEBUG", "processScanResult primary='$primaryOcr' hint='${hintOcr?.take(60)}'")
+        Log.d("MATCHER_DEBUG", Matcher.debugInput(primaryOcr))
 
-        val normalized = Matcher.normalize(text)
-        val searchQuery = MedicineNameResolver.buildSearchQuery(text)
+        val normalized = Matcher.normalize(primaryOcr)
+        val searchQuery = MedicineNameResolver.buildSearchQuery(primaryOcr)
+            .ifBlank { hintOcr?.let { MedicineNameResolver.buildSearchQuery(it) }.orEmpty() }
         lastNormalizationStatus = normalizationStatusLine(normalized, searchQuery)
 
         runOnUiThread {
             binding.statusText.text = lastNormalizationStatus
             binding.statusText.setTextColor("#9E9E9E".toColorInt())
 
-            extractVisibleQuantity(text)?.let { quantity ->
+            extractVisibleQuantity(primaryOcr)?.let { quantity ->
                 currentVisiblePackQuantity = quantity
                 if (binding.qtyToggle.isChecked && currentPillCount == null) {
                     currentDetectedQuantity = quantity
@@ -1068,12 +1104,12 @@ class MainActivity : AppCompatActivity() {
 
         isMatching = true
         matchingScope.launch(Dispatchers.Default) {
-            val resolved = MedicineNameResolver.resolve(text, blacklist, 3)
+            val resolved = MedicineNameResolver.resolveForScan(primaryOcr, hintOcr, blacklist, 3)
             lastSearchQuery = resolved.searchQuery
             val scanTime = System.currentTimeMillis() - scanStartTime
 
             logScanMetrics(
-                ocr = resolved.searchQuery.ifBlank { text },
+                ocr = resolved.searchQuery.ifBlank { primaryOcr },
                 topMatch = resolved.medicine?.name ?: "NONE",
                 confidence = resolved.score.toInt(),
                 blurry = lastBlurStatus,
@@ -1086,12 +1122,17 @@ class MainActivity : AppCompatActivity() {
                 val matches = resolved.alternatives
                 if (matches.isEmpty()) {
                     Log.e(TAG, "MATCH: no medicines for query '${resolved.searchQuery}'")
+                    currentMatch = null
+                    isLocked = false
+                    binding.confirmBtn.isEnabled = false
+                    binding.top3Choices.removeAllViews()
                     binding.statusText.text = normalizationStatusLine(
                         normalized,
                         resolved.searchQuery.ifBlank { searchQuery }
                     )
                     binding.resultTextView.text = getString(R.string.no_match_instruction)
                     binding.resultTextView.setTextColor("#F44336".toColorInt())
+                    binding.top3Container.visibility = View.GONE
                     Toast.makeText(this@MainActivity, "Not in your medicine list", Toast.LENGTH_LONG).show()
                     return@withContext
                 }
@@ -1127,6 +1168,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun processRawOutput(text: String) {
+        processScanResult(text, hintOcr = null)
     }
 
     private fun showSuggestionsUI(matches: List<Matcher.ScoredMatch>) {
@@ -1683,28 +1728,32 @@ class MainActivity : AppCompatActivity() {
         val top  = (height - cropHeight) / 2
         return Bitmap.createBitmap(this, left, top, cropWidth, cropHeight)
     }
-    override fun onResume() {
-        super.onResume()
-        val fromRhohitScreen = pendingOcrResult
-        val fromWideCrop = pendingWideOcrText
-        if (fromRhohitScreen.isNullOrBlank() && fromWideCrop.isNullOrBlank()) return
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_IMAGE_PROCESSING) return
+
+        val squareOcr = data?.getStringExtra(ImageProcessingActivity.EXTRA_PRIMARY_OCR)
+            ?: pendingOcrResult
+        val wideOcr = data?.getStringExtra(ImageProcessingActivity.EXTRA_WIDE_OCR)
+            ?: pendingWideOcrText
 
         pendingOcrResult = null
         pendingWideOcrText = null
 
-        val candidates = listOfNotNull(fromRhohitScreen, fromWideCrop)
-            .map { it.trim() }
-            .filter { it.length >= 3 }
-        if (candidates.isEmpty()) return
+        val primary = squareOcr?.trim().orEmpty()
+        val wide = wideOcr?.trim().orEmpty()
+        if (primary.length < 3 && wide.length < 3) {
+            binding.resultTextView.text = getString(R.string.ready_status)
+            binding.resultTextView.setTextColor("#E0E0E0".toColorInt())
+            binding.statusText.text = "Nothing readable — move closer & tap camera"
+            binding.statusText.setTextColor("#FF9800".toColorInt())
+            return
+        }
 
-        val ocrForMatch = candidates.maxByOrNull { it.length } ?: return
-        Log.d(TAG, "Merged OCR: rhohit=${fromRhohitScreen?.take(40)} wide=${fromWideCrop?.take(40)} → ${ocrForMatch.take(80)}")
-        if (!fromRhohitScreen.isNullOrBlank()) {
-            Log.d("MATCHER_DEBUG", "Rhohit screen OCR: ${Matcher.debugInput(fromRhohitScreen)}")
-        }
-        if (!fromWideCrop.isNullOrBlank()) {
-            Log.d("MATCHER_DEBUG", "Wide crop OCR: ${fromWideCrop.take(120)}")
-        }
-        processRawOutput(ocrForMatch)
+        Log.d(TAG, "Scan match after debug close: square=${primary.take(50)} wide=${wide.take(50)}")
+        processScanResult(
+            primaryOcr = if (primary.length >= 3) primary else wide,
+            hintOcr = if (primary.length >= 3) wide.takeIf { it.length >= 3 } else null
+        )
     }
 }

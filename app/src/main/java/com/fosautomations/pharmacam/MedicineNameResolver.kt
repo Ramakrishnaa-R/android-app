@@ -19,8 +19,11 @@ object MedicineNameResolver {
         "COUGH", "RELIEF", "ACTING", "FLAVOURED", "FLAVORED", "COMPOSITION", "INGREDIENT",
         "DEXTROMETHORPHAN", "CHLORPHENIRAMINE", "HYDROCHLORIDE", "GEAN", "CASES",
         "PARACETAMOL", "PAROCETAMOL", "PUROCETOMOL", "ACETAMINOPHEN",
-        "TABLETS", "TABLET", "TOBLETS", "TOBLET"
+        "TABLETS", "TABLET", "TOBLETS", "TOBLET",
+        "STONE", "CUTTER", "MALTA", "MALTO"
     )
+
+    private const val MIN_ACCEPT_SCORE = 55.0
 
     private val INGREDIENT_IN_TEXT = Regex(
         """PARACETAMOL|PAROCETAMOL|PUROCETOMOL|FUROCETOMOL|FUROCETAMOL|""" +
@@ -51,17 +54,26 @@ object MedicineNameResolver {
         val alternatives: List<Matcher.ScoredMatch>
     )
 
+    /** Merge square + wide OCR so subtitle text (e.g. ALKALIZER) is used for matching. */
+    fun combineOcrSources(vararg parts: String): String =
+        parts.map { it.trim() }.filter { it.length >= 2 }.joinToString(" ")
+
     /** Build a short query for [Matcher] — not the full OCR blob. */
     fun buildSearchQuery(ocrText: String): String {
+        val upper = ocrText.uppercase(Locale.ROOT)
+        if (upper.contains("ALKALIZER") || upper.contains("ALKAFLOW")) return "ALKALIZER"
+
         DOLO_IN_TEXT.find(ocrText)?.let { return "DOLO 650" }
 
-        val compact = ocrText.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
+        val compact = upper.replace(Regex("[^A-Z0-9]"), "")
+
+        detectAlkalizerBrand(compact)?.let { return it }
 
         extractDoloBrand(compact, ocrText)?.let { return it }
 
-        splitKnownFused(compact)?.let { return it }
-
         extractBrandStrengthFromCompact(compact)?.let { return it }
+
+        splitKnownFused(compact)?.let { return it }
 
         val fromIndex = findIndexedWordsInCompact(compact)
         if (fromIndex.isNotBlank()) return fromIndex
@@ -95,8 +107,55 @@ object MedicineNameResolver {
         return tokens.take(2).joinToString(" ")
     }
 
-    fun resolve(ocrText: String, blacklist: Set<String>, maxResults: Int = 3): Resolved {
-        val queries = buildSearchQueries(ocrText)
+    fun resolve(ocrText: String, blacklist: Set<String>, maxResults: Int = 3): Resolved =
+        resolveForScan(ocrText, hintOcr = null, blacklist, maxResults)
+
+    /**
+     * Accurate scan path: [primaryOcr] = 1:1 square (or pickBest) — used for UI.
+     * [hintOcr] = wide crop — only used to extract extra search queries, never merged into raw match text.
+     */
+    fun resolveForScan(
+        primaryOcr: String,
+        hintOcr: String?,
+        blacklist: Set<String>,
+        maxResults: Int = 3
+    ): Resolved {
+        val queries = linkedSetOf<String>()
+        buildSearchQueries(primaryOcr).forEach { queries.add(it) }
+        hintOcr?.trim()?.takeIf { it.length >= 3 }?.let { wide ->
+            buildSearchQueries(wide).forEach { queries.add(it) }
+            buildSearchQuery(wide).takeIf { it.isNotBlank() }?.let { queries.add(it) }
+        }
+        return resolveWithQueries(
+            ocrText = primaryOcr,
+            queries = queries.toList(),
+            blacklist = blacklist,
+            maxResults = maxResults,
+            allowRawFallback = false
+        )
+    }
+
+    fun resolveCombined(
+        blacklist: Set<String>,
+        maxResults: Int = 5,
+        vararg ocrParts: String
+    ): Resolved {
+        val combined = combineOcrSources(*ocrParts)
+        val queries = buildSearchQueries(combined).toMutableList()
+        ocrParts.map { it.trim() }.filter { it.length >= 3 }.forEach { part ->
+            val q = buildSearchQuery(part)
+            if (q.isNotBlank()) queries.add(q)
+        }
+        return resolveWithQueries(combined, queries.distinct(), blacklist, maxResults, allowRawFallback = false)
+    }
+
+    private fun resolveWithQueries(
+        ocrText: String,
+        queries: List<String>,
+        blacklist: Set<String>,
+        maxResults: Int,
+        allowRawFallback: Boolean = true
+    ): Resolved {
         Log.d(TAG, "RESOLVE: queries=$queries (from ${ocrText.take(80)}…)")
 
         var bestMatches = emptyList<Matcher.ScoredMatch>()
@@ -114,10 +173,12 @@ object MedicineNameResolver {
             }
         }
 
-        if (bestMatches.isEmpty() && queries.isNotEmpty()) {
+        if (bestMatches.isEmpty() && allowRawFallback && queries.isNotEmpty()) {
             bestMatches = Matcher.findTopMatches(ocrText, blacklist, maxResults)
             bestQuery = ocrText.take(40)
         }
+
+        bestMatches = filterPlausibleMatches(bestQuery, bestMatches)
 
         val top = bestMatches.firstOrNull()
         return Resolved(
@@ -126,6 +187,29 @@ object MedicineNameResolver {
             score = top?.score ?: 0.0,
             alternatives = bestMatches
         )
+    }
+
+    /** Drop weak scores and accessory false positives (e.g. TABLET CUTTER on Alkaflow). */
+    private fun filterPlausibleMatches(
+        query: String,
+        matches: List<Matcher.ScoredMatch>
+    ): List<Matcher.ScoredMatch> {
+        var filtered = matches.filter { it.score >= MIN_ACCEPT_SCORE }
+        val q = query.uppercase(Locale.ROOT)
+        if (q.contains("ALKALIZER") || q.contains("ALKAFLOW")) {
+            filtered = filtered.filter { it.medicine.name.uppercase().contains("ALKAL") }
+        }
+        if (q.contains("DOLO")) {
+            filtered = filtered.filter {
+                val n = it.medicine.name.uppercase()
+                n.contains("DOLO") || n.contains("PARACET") || n.contains("CROCIN")
+            }
+        }
+        filtered = filtered.filter { med ->
+            val name = med.medicine.name.uppercase()
+            !name.contains("TABLET CUTTER") && !name.contains("STONE CUTTER")
+        }
+        return filtered
     }
 
     private fun buildSearchQueries(ocrText: String): List<String> {
@@ -144,8 +228,21 @@ object MedicineNameResolver {
             list.add("DOLO 650")
             list.add("DOLOPAR 650")
         }
+        if (detectAlkalizerBrand(compact) != null) {
+            list.add("ALKALIZER")
+            list.add("ALKALIZER 100ML SYP")
+        }
 
         return list.distinct()
+    }
+
+    /** Pack brand "Alkaflow" / subtitle ALKALIZER → DB name ALKALIZER 100ML SYP. */
+    private fun detectAlkalizerBrand(compact: String): String? {
+        if (compact.contains("ALKALIZER") || compact.contains("ALKAFLOW")) return "ALKALIZER"
+        if (compact.contains("ALK") && (compact.contains("FLOW") || compact.contains("ALIZER"))) {
+            return "ALKALIZER"
+        }
+        return null
     }
 
     fun shouldAutoPick(resolved: Resolved): Boolean {
@@ -185,11 +282,15 @@ object MedicineNameResolver {
     }
 
     private fun splitKnownFused(compact: String): String? {
+        Regex("""AUGMENTIN(\d{2,4})""").find(compact)?.let { m ->
+            return "AUGMENTIN ${m.groupValues[1]}"
+        }
+        if (compact.contains("AUGMENTIN")) return "AUGMENTIN"
+
         val patterns = listOf(
             Regex("""ALKOF(COFGEL[S]?)""") to "ALKOF COFGELS",
             Regex("""ALKAZAR(LIQUID)?""") to "ALKAZAR",
             Regex("""CATAFAST""") to "CATAFAST",
-            Regex("""AUGMENTIN(\d+)?""") to "AUGMENTIN",
             Regex("""DOLO(650)?""", RegexOption.IGNORE_CASE) to "DOLO 650"
         )
         for ((pattern, name) in patterns) {
