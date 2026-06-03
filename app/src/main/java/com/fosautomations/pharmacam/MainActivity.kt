@@ -87,6 +87,7 @@ class MainActivity : AppCompatActivity() {
     private var latestScanText: String? = null
     private var lastOcrRaw: String? = null
     private var lastSearchQuery: String? = null
+    private var lastNormalizationStatus: String? = null
 
     private lateinit var cameraExecutor: ExecutorService
     private val matchingScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -111,7 +112,10 @@ class MainActivity : AppCompatActivity() {
     private val sampleFileName = "sample.txt"
 
     companion object {
+        /** OCR text from [ImageProcessingActivity] (Rhohit pipeline on 1:1 crop). */
         var pendingOcrResult: String? = null
+        /** Parallel 3:1 wide-crop OCR while the processing screen is open. */
+        var pendingWideOcrText: String? = null
         // Pre-compiled once at class load — never recompiled per-call
         private val UNIT_QTY_REGEX = Regex(
             """\b(\d{1,4})\s*(ML|M L|GM|GMS|GRAM|G|TAB|TABS|TABLET|TABLETS|CAP|CAPS|CAPSULE|CAPSULES|SYP|SUSP|LOTION|CREAM)\b"""
@@ -355,7 +359,55 @@ class MainActivity : AppCompatActivity() {
                             bitmap,
                             "full"
                         )?.let { debugSaves.add(it) }
-                        runLabelOcrFromCapture(bitmap, fromShutter = true, debugSaves)
+
+                        // Rhohit: visual pipeline on 1:1 crop + your 3:1 wide OCR in parallel
+                        val squareCrop = LabelOcrHelper.cropCenterSquare(bitmap)
+                        val wideCrop = LabelOcrHelper.cropCenterWide3x1(bitmap)
+                        bitmap.recycle()
+
+                        if (ScanDebugImageSaver.ENABLED) {
+                            matchingScope.launch(Dispatchers.IO) {
+                                ScanDebugImageSaver.saveCapture(
+                                    this@MainActivity,
+                                    squareCrop,
+                                    "crop_1x1"
+                                )?.let { debugSaves.add(it) }
+                                ScanDebugImageSaver.saveCapture(
+                                    this@MainActivity,
+                                    wideCrop,
+                                    "crop_3x1"
+                                )?.let { debugSaves.add(it) }
+                                withContext(Dispatchers.Main) {
+                                    if (debugSaves.isNotEmpty()) {
+                                        ScanDebugImageSaver.showSavedToast(
+                                            this@MainActivity,
+                                            debugSaves
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        pendingWideOcrText = null
+                        pendingOcrResult = null
+                        BitmapHolder.bitmap = squareCrop
+
+                        matchingScope.launch {
+                            val wideText = async(Dispatchers.Default) {
+                                val wideResult = recognizeCrop(wideCrop)
+                                wideResult.fullText.ifBlank { wideResult.matchText }
+                            }
+                            withContext(Dispatchers.Main) {
+                                finishCapture()
+                                startActivity(
+                                    Intent(
+                                        this@MainActivity,
+                                        ImageProcessingActivity::class.java
+                                    )
+                                )
+                            }
+                            pendingWideOcrText = wideText.await()
+                        }
 
                     } finally {
                         imageProxy.close()
@@ -470,8 +522,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun recognizeCrop(crop: Bitmap): LabelOcrHelper.OcrResult {
-        val prepared = LabelOcrHelper.prepareForOcr(crop)
+        val rhohitPrepared = withContext(Dispatchers.Default) {
+            ImageUtils.removeSpecularHighlights(ImageUtils.toGrayscale(crop))
+        }
         crop.recycle()
+        val prepared = LabelOcrHelper.prepareForOcr(rhohitPrepared)
+        if (rhohitPrepared !== prepared) rhohitPrepared.recycle()
         val primary = recognizePrepared(prepared)
         if (!LabelOcrHelper.needsFallback(primary)) {
             prepared.recycle()
@@ -971,6 +1027,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Rhohit-style matcher debug in Logcat (MATCHER_DEBUG). */
+    private fun logMatchAlternatives(searchQuery: String, matches: List<Matcher.ScoredMatch>) {
+        Log.d("MATCHER_DEBUG", "Search query used: '$searchQuery'")
+        matches.forEachIndexed { i, scored ->
+            Log.d(
+                "MATCHER_DEBUG",
+                "#${i + 1}: ${scored.medicine.name} → ${scored.score.toInt()}% [${scored.explanation}]"
+            )
+        }
+    }
+
     /** UI-only — does not change matching input. */
     private fun normalizationStatusLine(normalized: String, search: String, extra: String? = null): String {
         val base = "Normalized: $normalized | Search: $search"
@@ -984,9 +1051,10 @@ class MainActivity : AppCompatActivity() {
 
         val normalized = Matcher.normalize(text)
         val searchQuery = MedicineNameResolver.buildSearchQuery(text)
+        lastNormalizationStatus = normalizationStatusLine(normalized, searchQuery)
 
         runOnUiThread {
-            binding.statusText.text = normalizationStatusLine(normalized, searchQuery)
+            binding.statusText.text = lastNormalizationStatus
             binding.statusText.setTextColor("#9E9E9E".toColorInt())
 
             extractVisibleQuantity(text)?.let { quantity ->
@@ -1030,6 +1098,7 @@ class MainActivity : AppCompatActivity() {
 
                 val top = matches.first()
                 latestScanText = top.medicine.name
+                logMatchAlternatives(resolved.searchQuery, matches)
                 Log.d(
                     TAG,
                     "MATCH: '${resolved.searchQuery}' → ${top.medicine.name} (${top.score.toInt()}%)"
@@ -1126,6 +1195,10 @@ class MainActivity : AppCompatActivity() {
             currentMatch = med
             binding.resultTextView.text = formatDetectionResult(med.name)
             binding.resultTextView.setTextColor("#4CAF50".toColorInt())
+            lastNormalizationStatus?.let { line ->
+                binding.statusText.text = "$line | Found: ${med.name}"
+                binding.statusText.setTextColor("#4CAF50".toColorInt())
+            }
             beep?.startTone(ToneGenerator.TONE_PROP_BEEP, 100)
             vibrateFeedback(50)
             binding.confirmBtn.isEnabled = true
@@ -1610,13 +1683,28 @@ class MainActivity : AppCompatActivity() {
         val top  = (height - cropHeight) / 2
         return Bitmap.createBitmap(this, left, top, cropWidth, cropHeight)
     }
-    // In MainActivity.kt — add this override
     override fun onResume() {
         super.onResume()
-        val result = MainActivity.pendingOcrResult
-        if (!result.isNullOrBlank()) {
-            MainActivity.pendingOcrResult = null
-            processRawOutput(result!!)
+        val fromRhohitScreen = pendingOcrResult
+        val fromWideCrop = pendingWideOcrText
+        if (fromRhohitScreen.isNullOrBlank() && fromWideCrop.isNullOrBlank()) return
+
+        pendingOcrResult = null
+        pendingWideOcrText = null
+
+        val candidates = listOfNotNull(fromRhohitScreen, fromWideCrop)
+            .map { it.trim() }
+            .filter { it.length >= 3 }
+        if (candidates.isEmpty()) return
+
+        val ocrForMatch = candidates.maxByOrNull { it.length } ?: return
+        Log.d(TAG, "Merged OCR: rhohit=${fromRhohitScreen?.take(40)} wide=${fromWideCrop?.take(40)} → ${ocrForMatch.take(80)}")
+        if (!fromRhohitScreen.isNullOrBlank()) {
+            Log.d("MATCHER_DEBUG", "Rhohit screen OCR: ${Matcher.debugInput(fromRhohitScreen)}")
         }
+        if (!fromWideCrop.isNullOrBlank()) {
+            Log.d("MATCHER_DEBUG", "Wide crop OCR: ${fromWideCrop.take(120)}")
+        }
+        processRawOutput(ocrForMatch)
     }
 }
