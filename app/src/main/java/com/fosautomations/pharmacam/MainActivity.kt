@@ -1,7 +1,6 @@
 package com.fosautomations.pharmacam
 
 import android.Manifest
-import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Context
@@ -13,14 +12,10 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.wifi.WifiManager
 import android.os.*
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.widget.*
 import androidx.annotation.OptIn
@@ -104,10 +99,9 @@ class MainActivity : AppCompatActivity() {
 
     private var pillDetector: PillDetector? = null
     private lateinit var confirmedAdapter: ConfirmedMedicineAdapter
-    private var speechRecognizer: SpeechRecognizer? = null
+    private var speechRecognizer: android.speech.SpeechRecognizer? = null
     private var isListening = false
-    private var voiceAnimator: AnimatorSet? = null
-
+    private var voiceAnimator: android.animation.AnimatorSet? = null
     private val TAG = "TOM_DEBUG"
     private val sampleFileName = "sample.txt"
 
@@ -155,7 +149,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestRequiredPermissions() {
-        val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        val perms = arrayOf(Manifest.permission.CAMERA)
         val missing = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -192,7 +186,6 @@ class MainActivity : AppCompatActivity() {
         val configPrefs = getSharedPreferences("config", MODE_PRIVATE)
         serverIp = configPrefs.getString("server_ip", "") ?: ""
         binding.ipInput.setText(serverIp)
-        binding.autoConnectSwitch.isChecked = configPrefs.getBoolean("auto_connect", true)
 
         binding.connectBtn.setOnClickListener {
             val ip = binding.ipInput.text.toString().trim()
@@ -201,11 +194,6 @@ class MainActivity : AppCompatActivity() {
                 configPrefs.edit { putString("server_ip", ip) }
                 checkHealth(ip)
             } else scanNetwork()
-        }
-
-        binding.switchMode.setOnCheckedChangeListener { _, _ ->
-            resetState()
-            updateConfirmedVisibility()
         }
 
         binding.btnFlash.setOnClickListener {
@@ -229,35 +217,9 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, MedicineDbActivity::class.java))
         }
 
-        binding.btnVoice.setOnClickListener {
-            if (isListening) stopListening() else startVoiceRecognition()
-        }
-
         binding.btnShutter.setOnClickListener {
             requestShutterCapture()
         }
-
-        val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
-        binding.qtyToggle.isChecked = settingsPrefs.getBoolean("include_qty", true)
-        binding.qtyContainer.visibility =
-            if (binding.qtyToggle.isChecked) View.VISIBLE else View.GONE
-
-        binding.qtyToggle.setOnCheckedChangeListener { _, isChecked ->
-            binding.qtyContainer.visibility = if (isChecked) View.VISIBLE else View.GONE
-            settingsPrefs.edit { putBoolean("include_qty", isChecked) }
-            currentDetectedQuantity?.let {
-                if (isChecked) binding.quantityInput.setText(it.toString())
-            }
-        }
-
-        binding.radioEnter.isChecked =
-            settingsPrefs.getString("action_mode", "enter") != "tab"
-        binding.radioTab.isChecked = !binding.radioEnter.isChecked
-        binding.actionGroup.setOnCheckedChangeListener { _, checkedId ->
-            val mode = if (checkedId == R.id.radioTab) "tab" else "enter"
-            settingsPrefs.edit { putString("action_mode", mode) }
-        }
-
         confirmedAdapter = ConfirmedMedicineAdapter(confirmedMedicines) { position ->
             if (position in confirmedMedicines.indices) {
                 confirmedMedicines.removeAt(position)
@@ -356,27 +318,31 @@ class MainActivity : AppCompatActivity() {
 
                         scanStartTime = System.currentTimeMillis()
                         val debugSaves = mutableListOf<ScanDebugImageSaver.SavedCapture>()
-                        ScanDebugImageSaver.saveCapture(
-                            this@MainActivity,
-                            bitmap,
-                            "full"
-                        )?.let { debugSaves.add(it) }
 
                         // Rhohit: visual pipeline on 1:1 crop + your 3:1 wide OCR in parallel
                         val squareCrop = LabelOcrHelper.cropCenterSquare(bitmap)
                         val wideCrop = LabelOcrHelper.cropCenterWide3x1(bitmap)
                         bitmap.recycle()
+                        val squareForDebug = squareCrop.copy(Bitmap.Config.ARGB_8888, false)
+                        val wideForDebug = wideCrop.copy(Bitmap.Config.ARGB_8888, false)
+                        BitmapHolder.bitmap = squareForDebug
+                        BitmapHolder.wideBitmap = wideForDebug
+                        Log.d(
+                            TAG,
+                            "OCR crops: 1x1=${squareCrop.width}x${squareCrop.height} " +
+                                "3x1=${wideCrop.width}x${wideCrop.height}"
+                        )
 
                         if (ScanDebugImageSaver.ENABLED) {
                             matchingScope.launch(Dispatchers.IO) {
                                 ScanDebugImageSaver.saveCapture(
                                     this@MainActivity,
-                                    squareCrop,
+                                    squareForDebug,
                                     "crop_1x1"
                                 )?.let { debugSaves.add(it) }
                                 ScanDebugImageSaver.saveCapture(
                                     this@MainActivity,
-                                    wideCrop,
+                                    wideForDebug,
                                     "crop_3x1"
                                 )?.let { debugSaves.add(it) }
                                 withContext(Dispatchers.Main) {
@@ -392,9 +358,6 @@ class MainActivity : AppCompatActivity() {
 
                         pendingWideOcrText = null
                         pendingOcrResult = null
-
-                        val squareForDebug = squareCrop.copy(Bitmap.Config.ARGB_8888, false)
-                        BitmapHolder.bitmap = squareForDebug
 
                         matchingScope.launch {
                             val squareResult = async(Dispatchers.Default) { recognizeCrop(squareCrop) }
@@ -527,14 +490,18 @@ class MainActivity : AppCompatActivity() {
 
                 val squareDeferred = async(Dispatchers.Default) { recognizeCrop(squareCrop) }
                 val wideDeferred = async(Dispatchers.Default) { recognizeCrop(wideCrop) }
-                val best = LabelOcrHelper.pickBest(squareDeferred.await(), wideDeferred.await())
+                val square = squareDeferred.await()
+                val wide = wideDeferred.await()
+                val best = LabelOcrHelper.pickBest(square, wide)
+                pendingWideOcrText = wide.fullText.ifBlank { wide.matchText }
+                val wideText = pendingWideOcrText.orEmpty()
 
                 withContext(Dispatchers.Main) {
                     binding.loader.visibility = View.GONE
                     if (fromShutter && debugSaves.isNotEmpty()) {
                         ScanDebugImageSaver.showSavedToast(this@MainActivity, debugSaves)
                     }
-                    deliverOcrResult(best, fromShutter)
+                    deliverOcrResult(best, wideText, fromShutter)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "OCR pipeline failed", e)
@@ -586,9 +553,14 @@ class MainActivity : AppCompatActivity() {
                 }
         }
 
-    private fun deliverOcrResult(result: LabelOcrHelper.OcrResult, fromShutter: Boolean) {
+    private fun deliverOcrResult(
+        result: LabelOcrHelper.OcrResult,
+        wideOcr: String?,
+        fromShutter: Boolean
+    ) {
         Log.d(TAG, "OCR line: ${result.matchText}")
         Log.d(TAG, "OCR full: ${result.fullText}")
+        Log.d(TAG, "OCR wide: ${wideOcr.orEmpty()}")
 
         if (fromShutter) finishCapture()
 
@@ -596,7 +568,10 @@ class MainActivity : AppCompatActivity() {
         if (ocrForMatch.length >= 3) {
             binding.resultTextView.text = getString(R.string.matching_medicine)
             binding.resultTextView.setTextColor("#FF9800".toColorInt())
-            processRawOutput(ocrForMatch)
+            processScanResult(
+                primaryOcr = ocrForMatch,
+                hintOcr = wideOcr?.takeIf { it.length >= 3 }
+            )
         } else {
             binding.statusText.text = "Nothing readable — move closer & tap camera"
             binding.statusText.setTextColor("#FF9800".toColorInt())
@@ -606,161 +581,6 @@ class MainActivity : AppCompatActivity() {
                 Toast.LENGTH_LONG
             ).show()
         }
-    }
-
-    private fun startVoiceRecognition() {
-        Log.d(TAG, "startVoiceRecognition: Isolating resources")
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Log.e(TAG, "Voice: Not available on this device")
-            Toast.makeText(this, "Voice recognition not available", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (ContextCompat.checkSelfPermission(
-                this, Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            Log.w(TAG, "Voice: Missing RECORD_AUDIO permission")
-            ActivityCompat.requestPermissions(
-                this, arrayOf(Manifest.permission.RECORD_AUDIO), 101
-            )
-            return
-        }
-
-        stopCamera()
-        isListening = true
-
-        if (speechRecognizer == null) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-        }
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3000L)
-        }
-
-        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                Log.d(TAG, "Voice: Ready")
-                runOnUiThread {
-                    binding.resultTextView.text = getString(R.string.listening_status)
-                    binding.resultTextView.setTextColor("#FF9800".toColorInt())
-                }
-                startVoiceAnimation()
-            }
-
-            override fun onBeginningOfSpeech() { Log.d(TAG, "Voice: Speech detected!") }
-
-            override fun onRmsChanged(rmsdB: Float) {
-                val scale = 1.0f + (rmsdB / 10f).coerceAtLeast(0f)
-                binding.voiceRipple.scaleX = scale
-                binding.voiceRipple.scaleY = scale
-                binding.voiceRipple.alpha = (rmsdB / 10f).coerceIn(0.1f, 0.6f)
-            }
-
-            override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {
-                Log.d(TAG, "Voice: End of speech")
-                runOnUiThread { binding.resultTextView.text = getString(R.string.processing_status) }
-            }
-
-            override fun onError(error: Int) {
-                val errorMsg = when (error) {
-                    SpeechRecognizer.ERROR_AUDIO                -> "ERROR_AUDIO (mic problem)"
-                    SpeechRecognizer.ERROR_CLIENT               -> "ERROR_CLIENT (client side)"
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_PERMISSIONS"
-                    SpeechRecognizer.ERROR_NETWORK              -> "ERROR_NETWORK"
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT      -> "ERROR_NETWORK_TIMEOUT"
-                    SpeechRecognizer.ERROR_NO_MATCH             -> "ERROR_NO_MATCH (nothing recognized)"
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY      -> "ERROR_BUSY"
-                    SpeechRecognizer.ERROR_SERVER               -> "ERROR_SERVER"
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT       -> "ERROR_SPEECH_TIMEOUT (no speech detected)"
-                    else                                        -> "ERROR_UNKNOWN ($error)"
-                }
-                Log.e(TAG, "Voice Error: $error = $errorMsg")
-                isListening = false
-                stopVoiceAnimation()
-                binding.voiceRipple.visibility = View.GONE
-                startCamera()
-                runOnUiThread {
-                    binding.statusText.text = "Voice failed: $errorMsg"
-                    resetState()
-                }
-            }
-
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                Log.d(TAG, "Voice: FINAL RESULTS = $matches")
-                isListening = false
-                stopVoiceAnimation()
-                binding.voiceRipple.visibility = View.GONE
-                startCamera()
-                if (!matches.isNullOrEmpty()) {
-                    val topResult = matches[0]
-                    Log.d(TAG, "Voice: Processing '$topResult'")
-                    processRawOutput(topResult)
-                } else {
-                    Log.e(TAG, "Voice: Results bundle was empty!")
-                    runOnUiThread { binding.statusText.text = "No speech detected" }
-                }
-            }
-
-            override fun onPartialResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!matches.isNullOrEmpty()) {
-                    Log.d(TAG, "Voice: PARTIAL = ${matches[0]}")
-                    runOnUiThread {
-                        binding.resultTextView.text = matches[0].uppercase()
-                        binding.statusText.text = "Hearing: ${matches[0]}"
-                    }
-                }
-            }
-
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        speechRecognizer?.startListening(intent)
-    }
-
-    private fun stopListening() {
-        Log.d(TAG, "stopListening: Cleanup")
-        isListening = false
-        speechRecognizer?.cancel()
-        stopVoiceAnimation()
-        binding.voiceRipple.visibility = View.GONE
-        startCamera()
-        if (currentMatch == null) {
-            binding.resultTextView.text = getString(R.string.ready_status)
-            binding.resultTextView.setTextColor("#E0E0E0".toColorInt())
-        }
-    }
-
-    private fun startVoiceAnimation() {
-        binding.voiceRipple.visibility = View.VISIBLE
-        binding.btnVoice.setColorFilter(Color.RED)
-        val pulseX = ObjectAnimator.ofFloat(binding.btnVoice, "scaleX", 1f, 1.2f, 1f)
-        val pulseY = ObjectAnimator.ofFloat(binding.btnVoice, "scaleY", 1f, 1.2f, 1f)
-        pulseX.repeatCount = ValueAnimator.INFINITE
-        pulseY.repeatCount = ValueAnimator.INFINITE
-        voiceAnimator = AnimatorSet().apply {
-            playTogether(pulseX, pulseY)
-            duration = 1000
-            interpolator = AccelerateDecelerateInterpolator()
-            start()
-        }
-    }
-
-    private fun stopVoiceAnimation() {
-        voiceAnimator?.cancel()
-        voiceAnimator = null
-        binding.btnVoice.scaleX = 1f
-        binding.btnVoice.scaleY = 1f
-        binding.btnVoice.setColorFilter("#FF9800".toColorInt())
     }
 
     private fun setupData() {
@@ -818,7 +638,7 @@ class MainActivity : AppCompatActivity() {
                                 val now = System.currentTimeMillis()
 
                                 if (!isLocked && !isMatching && !isListening && !isCapturing &&
-                                    binding.qtyToggle.isChecked && (now - lastScanTime > 700)
+                                    isQuantityEnabled() && (now - lastScanTime > 700)
                                 ) {
                                     pillDetector?.let { detector ->
                                         val bitmap = imageProxy.toDetectorBitmap().centerCrop(
@@ -832,7 +652,6 @@ class MainActivity : AppCompatActivity() {
                                                 currentPillCount = pillCount
                                                 if (currentMatch?.isPillLike() != false) {
                                                     currentDetectedQuantity = pillCount
-                                                    binding.quantityInput.setText(pillCount.toString())
                                                 }
                                                 binding.statusText.text = "PILLS FOUND: $pillCount"
                                                 binding.statusText.setTextColor("#4CAF50".toColorInt())
@@ -1095,9 +914,8 @@ class MainActivity : AppCompatActivity() {
 
             extractVisibleQuantity(primaryOcr)?.let { quantity ->
                 currentVisiblePackQuantity = quantity
-                if (binding.qtyToggle.isChecked && currentPillCount == null) {
+                if (isQuantityEnabled() && currentPillCount == null) {
                     currentDetectedQuantity = quantity
-                    binding.quantityInput.setText(quantity.toString())
                 }
             }
         }
@@ -1175,7 +993,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSuggestionsUI(matches: List<Matcher.ScoredMatch>) {
-        if (binding.switchMode.isChecked) {
+        if (isMultiModeEnabled()) {
             onMedicineDetected(matches.first().medicine)
             return
         }
@@ -1226,7 +1044,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun onMedicineDetected(med: Medicine) {
         applyBestQuantityFor(med)
-        if (binding.switchMode.isChecked) {
+        if (isMultiModeEnabled()) {
             if (!confirmedMedicines.any { it.id == med.id }) {
                 confirmedMedicines.add(0, med)
                 confirmedAdapter.notifyItemInserted(0)
@@ -1252,7 +1070,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun formatDetectionResult(name: String): String {
         val quantity = currentDetectedQuantity
-        return if (binding.qtyToggle.isChecked && quantity != null && quantity > 0) {
+        return if (isQuantityEnabled() && quantity != null && quantity > 0) {
             "${name.uppercase()}  |  QTY $quantity"
         } else {
             name.uppercase()
@@ -1260,7 +1078,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyBestQuantityFor(med: Medicine) {
-        if (!binding.qtyToggle.isChecked) return
+        if (!isQuantityEnabled()) return
         val quantity = if (med.isPillLike()) {
             currentPillCount ?: currentVisiblePackQuantity ?: extractVisibleQuantity(med.name)
         } else {
@@ -1268,9 +1086,13 @@ class MainActivity : AppCompatActivity() {
         }
         if (quantity != null && quantity > 0) {
             currentDetectedQuantity = quantity
-            binding.quantityInput.setText(quantity.toString())
         }
     }
+
+    private fun isMultiModeEnabled(): Boolean = false
+
+    private fun isQuantityEnabled(): Boolean =
+        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("include_qty", true)
 
     // Uses pre-compiled UNIT_QTY_REGEX and STRIP_COUNT_REGEX from companion object.
     // Previously Regex(...) was constructed fresh on every call.
@@ -1302,11 +1124,11 @@ class MainActivity : AppCompatActivity() {
                 .getString("action_mode", "enter") == "tab") "tab" else "enter"
         val includeQty = getSharedPreferences("settings", MODE_PRIVATE)
             .getBoolean("include_qty", true)
-        val list = if (binding.switchMode.isChecked) confirmedMedicines.toList()
+        val list = if (isMultiModeEnabled()) confirmedMedicines.toList()
         else currentMatch?.let { listOf(it) } ?: emptyList()
         val sampleText = list.map { it.name }.joinToString(", ").ifBlank { latestScanText.orEmpty() }
         val quantity = if (includeQty) {
-            binding.quantityInput.text.toString().toIntOrNull() ?: currentDetectedQuantity
+            currentDetectedQuantity ?: 1
         } else null
 
         val sampleSaveMessage = appendConfirmationToSampleFile(sampleText, quantity)
@@ -1334,7 +1156,7 @@ class MainActivity : AppCompatActivity() {
                     if (success) {
                         blacklist.clear()
                         resetState()
-                        if (binding.switchMode.isChecked) {
+                        if (isMultiModeEnabled()) {
                             confirmedMedicines.clear()
                             confirmedAdapter.notifyDataSetChanged()
                             updateConfirmedVisibility()
@@ -1428,7 +1250,6 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             binding.resultTextView.text = getString(R.string.ready_status)
             binding.resultTextView.setTextColor("#E0E0E0".toColorInt())
-            binding.quantityInput.setText("1")
             binding.loader.visibility = View.GONE
             binding.top3Container.visibility = View.GONE
             binding.scanBox.setBackgroundColor(Color.TRANSPARENT)
@@ -1439,7 +1260,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateConfirmedVisibility() {
         binding.confirmedRecyclerView.visibility =
-            if (binding.switchMode.isChecked && confirmedMedicines.isNotEmpty()) View.VISIBLE
+            if (isMultiModeEnabled() && confirmedMedicines.isNotEmpty()) View.VISIBLE
             else View.GONE
     }
 
@@ -1489,10 +1310,13 @@ class MainActivity : AppCompatActivity() {
         matchingScope.launch {
             while (isActive) {
                 delay(5000)
-                if (binding.autoConnectSwitch.isChecked && serverIp.isNotEmpty()) checkHealth(serverIp)
+                if (isAutoReconnectEnabled() && serverIp.isNotEmpty()) checkHealth(serverIp)
             }
         }
     }
+
+    private fun isAutoReconnectEnabled(): Boolean =
+        getSharedPreferences("config", MODE_PRIVATE).getBoolean("auto_connect", true)
 
     private fun vibrateFeedback(duration: Long) {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

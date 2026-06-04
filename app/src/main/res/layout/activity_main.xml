@@ -34,15 +34,6 @@
             android:layout_height="1dp"
             android:layout_weight="1" />
 
-        <androidx.appcompat.widget.SwitchCompat
-            android:id="@+id/autoConnectSwitch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="8dp"
-            android:text="Auto"
-            android:textColor="#E0E0E0"
-            android:textSize="12sp" />
-
         <EditText
             android:id="@+id/ipInput"
             android:layout_width="110dp"
@@ -109,17 +100,6 @@
             android:layout_height="50dp"
             android:layout_gravity="center"
             android:indeterminateTint="#4CAF50"
-            android:visibility="gone" />
-
-        <!-- Voice Level Indicator (overlay on camera) -->
-        <View
-            android:id="@+id/voiceRipple"
-            android:layout_width="100dp"
-            android:layout_height="100dp"
-            android:layout_gravity="center"
-            android:background="@android:drawable/presence_video_online"
-            android:backgroundTint="#FF9800"
-            android:alpha="0"
             android:visibility="gone" />
 
         <ImageButton
@@ -219,103 +199,10 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchMode"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="MULTI"
-                    android:textColor="#AAAAAA"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/qtyToggle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="QTY"
-                    android:textColor="#AAAAAA"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-
-                <View
-                    android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1" />
-
-                <LinearLayout
-                    android:id="@+id/qtyContainer"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
-                    android:visibility="gone">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="QTY:"
-                        android:textColor="#AAAAAA"
-                        android:textSize="12sp" />
-
-                    <EditText
-                        android:id="@+id/quantityInput"
-                        android:layout_width="45dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="4dp"
-                        android:background="@android:drawable/edit_text"
-                        android:gravity="center"
-                        android:importantForAutofill="no"
-                        android:inputType="number"
-                        android:padding="4dp"
-                        android:text="1"
-                        android:textColor="#000000"
-                        android:textSize="14sp" />
-                </LinearLayout>
-
-                <View
-                    android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1" />
-
-                <RadioGroup
-                    android:id="@+id/actionGroup"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-
-                    <RadioButton
-                        android:id="@+id/radioTab"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="TAB"
-                        android:textColor="#AAAAAA"
-                        android:textSize="10sp" />
-
-                    <RadioButton
-                        android:id="@+id/radioEnter"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="ENT"
-                        android:textColor="#AAAAAA"
-                        android:textSize="10sp" />
-                </RadioGroup>
-
-                <ImageButton
-                    android:id="@+id/btnVoice"
-                    android:layout_width="50dp"
-                    android:layout_height="50dp"
-                    android:layout_marginStart="8dp"
-                    android:background="?attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="Voice Search"
-                    android:src="@android:drawable/ic_btn_speak_now"
-                    app:tint="#FF9800" />
-
                 <ImageButton
                     android:id="@+id/captureModeBtn"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
-                    android:layout_marginStart="8dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:src="@android:drawable/ic_menu_manage"
                     app:tint="#2196F3" />

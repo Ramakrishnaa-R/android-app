@@ -12,12 +12,18 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Rhohit debug screen — image pipeline steps only.
@@ -39,6 +45,9 @@ class ImageProcessingActivity : AppCompatActivity() {
                 showmessage("Error: ${e.message ?: "processing failed"}")
             }
     )
+    private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private var resultPrimaryOcr = ""
+    private var resultWideOcr = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,14 +73,12 @@ class ImageProcessingActivity : AppCompatActivity() {
         val container = findViewById<LinearLayout>(R.id.stepsContainer)
 
         showStep(container, "📷 Original Capture (1:1)", original)
-        saveDebugStage(original, "debug_original")
         delay(500)
 
         val grayscale = withContext(Dispatchers.Default) {
             ImageUtils.toGrayscale(original)
         }
         showStep(container, "🔲 Grayscale", grayscale)
-        saveDebugStage(grayscale, "debug_grayscale")
         delay(500)
 
         val noGlare = withContext(Dispatchers.Default) {
@@ -79,21 +86,18 @@ class ImageProcessingActivity : AppCompatActivity() {
         }
         if (grayscale !== noGlare) grayscale.recycle()
         showStep(container, "✨ Glare Removed", noGlare)
-        saveDebugStage(noGlare, "debug_glare_removed")
         delay(500)
 
         val thresholded = withContext(Dispatchers.Default) {
             ImageUtils.adaptiveThreshold(noGlare)
         }
         showStep(container, "⬛ Adaptive Threshold", thresholded)
-        saveDebugStage(thresholded, "debug_adaptive_threshold")
         delay(500)
 
         val binarized = withContext(Dispatchers.Default) {
             ImageUtils.preprocessForOCR(noGlare)
         }
         showStep(container, "🔤 Binarized (debug view)", binarized)
-        saveDebugStage(binarized, "debug_binarized_ocr")
         delay(500)
 
         findViewById<ProgressBar>(R.id.loader).visibility = View.GONE
@@ -115,6 +119,17 @@ class ImageProcessingActivity : AppCompatActivity() {
             waits++
         }
 
+        if (squareOcr.length < 3) {
+            squareOcr = recognizeDebugBitmap(original)
+        }
+        if (wideOcr.length < 3) {
+            BitmapHolder.wideBitmap?.let { wideBitmap ->
+                wideOcr = recognizeDebugBitmap(wideBitmap)
+            }
+        }
+        resultPrimaryOcr = squareOcr
+        resultWideOcr = wideOcr
+
         showTextPipeline(container, squareOcr, wideOcr)
         showMatchResults(container, squareOcr, wideOcr)
 
@@ -129,6 +144,46 @@ class ImageProcessingActivity : AppCompatActivity() {
         if (binarized !== noGlare) binarized.recycle()
         noGlare.recycle()
     }
+
+    private suspend fun recognizeDebugBitmap(bitmap: Bitmap): String {
+        if (bitmap.isRecycled) return ""
+        return try {
+            val cropCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+            val rhohitPrepared = withContext(Dispatchers.Default) {
+                ImageUtils.removeSpecularHighlights(ImageUtils.toGrayscale(cropCopy))
+            }
+            cropCopy.recycle()
+            val prepared = LabelOcrHelper.prepareForOcr(rhohitPrepared)
+            if (rhohitPrepared !== prepared) rhohitPrepared.recycle()
+
+            val primary = recognizePrepared(prepared)
+            if (!LabelOcrHelper.needsFallback(primary)) {
+                prepared.recycle()
+                return primary.fullText.ifBlank { primary.matchText }
+            }
+
+            val binarized = LabelOcrHelper.preprocessBinarized(prepared)
+            prepared.recycle()
+            val secondary = recognizePrepared(binarized)
+            binarized.recycle()
+            val best = LabelOcrHelper.pickBetter(primary, secondary)
+            best.fullText.ifBlank { best.matchText }
+        } catch (e: Exception) {
+            Log.e("IMAGE_PROCESSING", "Fallback OCR failed", e)
+            ""
+        }
+    }
+
+    private suspend fun recognizePrepared(bitmap: Bitmap): LabelOcrHelper.OcrResult =
+        suspendCancellableCoroutine { cont ->
+            recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                .addOnSuccessListener { visionText ->
+                    if (cont.isActive) cont.resume(LabelOcrHelper.extractBestText(visionText))
+                }
+                .addOnFailureListener { e ->
+                    if (cont.isActive) cont.resumeWithException(e)
+                }
+        }
 
     private fun showTextPipeline(container: LinearLayout, squareOcr: String, wideOcr: String) {
         showTextStep(container, "📝 OCR used for match (1:1 / pickBest)", squareOcr.ifBlank { "(empty)" })
@@ -255,24 +310,23 @@ class ImageProcessingActivity : AppCompatActivity() {
         }
     }
 
-    private fun saveDebugStage(bitmap: Bitmap, label: String) {
-        if (!ScanDebugImageSaver.ENABLED || bitmap.isRecycled) return
-        ScanDebugImageSaver.saveCapture(this, bitmap, label)
-    }
-
     private fun finishWithResult() {
         setResult(
             RESULT_OK,
             android.content.Intent().apply {
                 putExtra(
                     EXTRA_PRIMARY_OCR,
-                    intent.getStringExtra(EXTRA_PRIMARY_OCR)
-                        ?: MainActivity.pendingOcrResult.orEmpty()
+                    resultPrimaryOcr.ifBlank {
+                        intent.getStringExtra(EXTRA_PRIMARY_OCR)
+                            ?: MainActivity.pendingOcrResult.orEmpty()
+                    }
                 )
                 putExtra(
                     EXTRA_WIDE_OCR,
-                    intent.getStringExtra(EXTRA_WIDE_OCR)
-                        ?: MainActivity.pendingWideOcrText.orEmpty()
+                    resultWideOcr.ifBlank {
+                        intent.getStringExtra(EXTRA_WIDE_OCR)
+                            ?: MainActivity.pendingWideOcrText.orEmpty()
+                    }
                 )
             }
         )
@@ -283,6 +337,7 @@ class ImageProcessingActivity : AppCompatActivity() {
         super.onDestroy()
         scope.cancel()
         BitmapHolder.bitmap = null
+        BitmapHolder.wideBitmap = null
     }
 
     @Deprecated("Deprecated in Android API; keeps hardware Back behavior aligned with Close.")
