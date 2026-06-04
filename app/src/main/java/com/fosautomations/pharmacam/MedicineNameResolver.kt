@@ -46,6 +46,10 @@ object MedicineNameResolver {
         """[A-Z][A-Z0-9]{1,8}[\-]?6?5?0""",
         RegexOption.IGNORE_CASE
     )
+    private val AUGMENTIN_OCR_STRENGTH = Regex(
+        """\bA?UG?MENTIN\s+([56S2Z]2[5S])\b""",
+        RegexOption.IGNORE_CASE
+    )
 
     data class Resolved(
         val searchQuery: String,
@@ -64,6 +68,8 @@ object MedicineNameResolver {
         if (upper.contains("ALKALIZER") || upper.contains("ALKAFLOW")) return "ALKALIZER"
 
         DOLO_IN_TEXT.find(ocrText)?.let { return "DOLO 650" }
+
+        normalizeKnownStrengthOcr(upper)?.let { return it }
 
         val compact = upper.replace(Regex("[^A-Z0-9]"), "")
 
@@ -101,10 +107,12 @@ object MedicineNameResolver {
 
         val brandish = tokens.filter { isBrandToken(it) || BRAND_STRENGTH_COMPACT.matches(it) }
         if (brandish.isNotEmpty()) {
-            return brandish.take(2).joinToString(" ")
+            return normalizeKnownStrengthOcr(brandish.take(2).joinToString(" "))
+                ?: brandish.take(2).joinToString(" ")
         }
 
-        return tokens.take(2).joinToString(" ")
+        val fallback = tokens.take(2).joinToString(" ")
+        return normalizeKnownStrengthOcr(fallback) ?: fallback
     }
 
     fun resolve(ocrText: String, blacklist: Set<String>, maxResults: Int = 3): Resolved =
@@ -205,6 +213,12 @@ object MedicineNameResolver {
                 n.contains("DOLO") || n.contains("PARACET") || n.contains("CROCIN")
             }
         }
+        if (q.contains("AUGMENTIN") && (q.contains("625") || q.contains("525"))) {
+            filtered = filtered.filter {
+                val n = it.medicine.name.uppercase()
+                n.contains("AUGMENTIN") && n.contains("625")
+            }
+        }
         filtered = filtered.filter { med ->
             val name = med.medicine.name.uppercase()
             !name.contains("TABLET CUTTER") && !name.contains("STONE CUTTER")
@@ -231,6 +245,12 @@ object MedicineNameResolver {
         if (detectAlkalizerBrand(compact) != null) {
             list.add("ALKALIZER")
             list.add("ALKALIZER 100ML SYP")
+        }
+        if ((compact.contains("AUGMENTIN") || compact.contains("AGMENTIN")) &&
+            (compact.contains("625") || compact.contains("525") || compact.contains("S25") || compact.contains("SZS"))
+        ) {
+            list.add("AUGMENTIN 625")
+            list.add("AUGMENTIN 625 TAB")
         }
 
         return list.distinct()
@@ -282,10 +302,14 @@ object MedicineNameResolver {
     }
 
     private fun splitKnownFused(compact: String): String? {
-        Regex("""AUGMENTIN(\d{2,4})""").find(compact)?.let { m ->
-            return "AUGMENTIN ${m.groupValues[1]}"
+        Regex("""A?UG?MENTIN(\d{2,4})""").find(compact)?.let { m ->
+            val strength = if (m.groupValues[1] == "525") "625" else m.groupValues[1]
+            return "AUGMENTIN $strength"
         }
-        if (compact.contains("AUGMENTIN")) return "AUGMENTIN"
+        Regex("""A?UG?MENTIN[S5Z2]2[5S]""").find(compact)?.let {
+            return "AUGMENTIN 625"
+        }
+        if (compact.contains("AUGMENTIN") || compact.contains("AGMENTIN")) return "AUGMENTIN"
 
         val patterns = listOf(
             Regex("""ALKOF(COFGEL[S]?)""") to "ALKOF COFGELS",
@@ -341,5 +365,14 @@ object MedicineNameResolver {
         if (INGREDIENT_IN_TEXT.matches(token)) return false
         val letters = token.count { it.isLetter() }
         return letters >= token.length * 0.7
+    }
+
+    private fun normalizeKnownStrengthOcr(text: String): String? {
+        val upper = text.uppercase(Locale.ROOT)
+        val match = AUGMENTIN_OCR_STRENGTH.find(upper) ?: return null
+        val strength = match.groupValues[1]
+            .replace('S', '5')
+            .replace('Z', '2')
+        return if (strength == "625" || strength == "525" || strength == "225") "AUGMENTIN 625" else null
     }
 }

@@ -199,14 +199,25 @@ class ImageProcessingActivity : AppCompatActivity() {
         val normalized = Matcher.normalize(squareOcr)
         showTextStep(container, "📋 Normalized (matcher)", normalized.ifBlank { "(empty)" })
 
-        val searchQuery = MedicineNameResolver.buildSearchQuery(squareOcr)
-            .ifBlank { MedicineNameResolver.buildSearchQuery(wideOcr) }
+        val searchQuery = resolveDisplayQuery(squareOcr, wideOcr)
         showTextStep(container, "🔎 Search query (resolver)", searchQuery.ifBlank { "(empty)" })
 
-        val matcherDebug = Matcher.debugInput(squareOcr)
+        val matcherDebug = Matcher.debugInput(searchQuery.ifBlank { squareOcr })
         showTextStep(container, "✅ Sent to Matcher", matcherDebug)
 
         scrollToBottom()
+    }
+
+    private fun resolveDisplayQuery(squareOcr: String, wideOcr: String): String {
+        if (squareOcr.length < 3 && wideOcr.length < 3) return ""
+        val primary = squareOcr.ifBlank { wideOcr }
+        val blacklist = intent.getStringArrayListExtra(EXTRA_BLACKLIST)?.toSet() ?: emptySet()
+        return if (MedicineRepository.isReady()) {
+            MedicineNameResolver.resolveForScan(primary, wideOcr, blacklist, 5).searchQuery
+        } else {
+            MedicineNameResolver.buildSearchQuery(primary)
+                .ifBlank { MedicineNameResolver.buildSearchQuery(wideOcr) }
+        }
     }
 
     private fun showMatchResults(container: LinearLayout, squareOcr: String, wideOcr: String) {

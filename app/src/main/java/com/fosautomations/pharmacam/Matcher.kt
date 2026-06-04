@@ -463,10 +463,17 @@ object Matcher {
         val partialNumberMatch = inputNumbers.any { inp ->
             medNumbers.any { med -> med.startsWith(inp) || inp.startsWith(med) }
         }
+        val fuzzyNumberMatch = inputNumbers.any { inp ->
+            medNumbers.any { med -> isLikelyOcrNumberMatch(inp, med) }
+        }
         when {
             commonNumbers.isNotEmpty() -> {
                 score += 35.0
                 reasons.add("NUM_MATCH($commonNumbers)")
+            }
+            fuzzyNumberMatch -> {
+                score += 25.0
+                reasons.add("NUM_FUZZY_MATCH(in=$inputNumbers,med=$medNumbers)")
             }
             partialNumberMatch -> {
                 score += 15.0
@@ -614,6 +621,11 @@ object Matcher {
 
     private fun extractNumbers(text: String): Set<String> =
         Regex("\\d+").findAll(text).map { it.value }.toSet()
+
+    private fun isLikelyOcrNumberMatch(input: String, medicine: String): Boolean {
+        if (input.length != medicine.length || input.length !in 2..4) return false
+        return levenshtein(input, medicine) == 1
+    }
 
     private fun tokenize(text: String): List<String> =
         text.uppercase(Locale.ROOT).split(" ")
