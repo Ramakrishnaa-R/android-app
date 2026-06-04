@@ -1,0 +1,136 @@
+package com.fosautomations.pharmacam
+
+import java.math.BigDecimal
+import java.util.Locale
+
+object NumericOcrCorrector {
+
+    private val strengths = setOf(
+        "1", "2", "2.5", "3", "4", "5", "6", "8", "10",
+        "12.5", "15", "20", "25", "30", "40", "50",
+        "60", "75", "80", "90", "100", "110", "120",
+        "125", "150", "180", "200", "220", "228",
+        "250", "300", "333", "375", "400", "457",
+        "500", "550", "600", "625", "650", "667",
+        "750", "800", "850", "1000", "1200",
+        "1500", "2000", "3000"
+    ).map { normalizeNumber(it) }.toSet()
+
+    private val units = setOf("MG", "MCG", "G", "GM", "KG", "ML", "L", "IU", "%")
+    private val tokenRegex = Regex("""[A-Za-z0-9.]+%?|[^A-Za-z0-9.]+""")
+    private val wordRegex = Regex("""^[A-Za-z0-9.]+%?$""")
+
+    fun correct(text: String): String {
+        if (text.isBlank()) return text
+        val tokens = tokenRegex.findAll(text).map { it.value }.toList()
+        return buildString {
+            tokens.forEachIndexed { index, token ->
+                append(
+                    if (wordRegex.matches(token)) {
+                        correctToken(
+                            token = token,
+                            previousWord = nearestWord(tokens, index, -1),
+                            nextWord = nearestWord(tokens, index, 1)
+                        )
+                    } else {
+                        token
+                    }
+                )
+            }
+        }
+    }
+
+    private fun correctToken(token: String, previousWord: String?, nextWord: String?): String {
+        val split = splitToken(token) ?: return token
+        if (!looksLikeNumericOcr(split.numeric)) return token
+
+        val corrected = correctNumber(split.numeric) ?: return token
+        val hasUnitContext = split.unit.isNotEmpty() || isUnit(previousWord) || isUnit(nextWord)
+        if (!hasUnitContext && !isStandaloneStrengthCandidate(split.numeric, corrected)) return token
+
+        return "${split.numericPrefix}$corrected${split.unit}${split.suffix}"
+    }
+
+    private data class TokenParts(
+        val numericPrefix: String,
+        val numeric: String,
+        val unit: String,
+        val suffix: String
+    )
+
+    private fun splitToken(token: String): TokenParts? {
+        var core = token
+        var suffix = ""
+        if (core.endsWith("%")) {
+            core = core.dropLast(1)
+            suffix = "%"
+        }
+
+        var unit = ""
+        val upper = core.uppercase(Locale.ROOT)
+        units.filter { it != "%" }
+            .sortedByDescending { it.length }
+            .firstOrNull { upper.endsWith(it) && core.length > it.length }
+            ?.let { found ->
+                unit = found
+                core = core.dropLast(found.length)
+            }
+
+        if (core.isBlank()) return null
+        return TokenParts(numericPrefix = "", numeric = core, unit = unit, suffix = suffix)
+    }
+
+    private fun correctNumber(value: String): String? {
+        val candidate = buildString {
+            value.forEach { ch ->
+                append(
+                    when (ch) {
+                        'G' -> '6'
+                        'g' -> '9'
+                        'S', 's' -> '5'
+                        'O', 'o' -> '0'
+                        'I', 'l', 'L' -> '1'
+                        'B' -> '8'
+                        'Z' -> '2'
+                        else -> ch
+                    }
+                )
+            }
+        }
+        if (!candidate.matches(Regex("""\d+(\.\d+)?"""))) return null
+
+        val normalized = normalizeNumber(candidate)
+        return if (normalized in strengths) normalized else null
+    }
+
+    private fun looksLikeNumericOcr(value: String): Boolean {
+        val chars = value.filter { it != '.' }
+        if (chars.isEmpty()) return false
+        return chars.all { ch ->
+            ch.isDigit() || ch in setOf('G', 'g', 'S', 's', 'O', 'o', 'I', 'l', 'L', 'B', 'Z')
+        }
+    }
+
+    private fun isStandaloneStrengthCandidate(original: String, corrected: String): Boolean {
+        if (original.length > 4) return false
+        return original != corrected || original.all { it.isDigit() }
+    }
+
+    private fun nearestWord(tokens: List<String>, index: Int, step: Int): String? {
+        var cursor = index + step
+        while (cursor in tokens.indices) {
+            val token = tokens[cursor]
+            if (wordRegex.matches(token)) return token
+            cursor += step
+        }
+        return null
+    }
+
+    private fun isUnit(token: String?): Boolean =
+        token?.uppercase(Locale.ROOT)?.trimEnd('.') in units
+
+    private fun normalizeNumber(value: String): String {
+        val decimal = BigDecimal(value).stripTrailingZeros()
+        return decimal.toPlainString()
+    }
+}

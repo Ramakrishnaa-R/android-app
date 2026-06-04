@@ -1206,6 +1206,7 @@ class MainActivity : AppCompatActivity() {
         action: String, quantity: Int?, sampleSaveMessage: String
     ): Boolean {
         return try {
+            val endpoint = parseServerEndpoint(serverIp)
             val json = JSONObject().apply {
                 put("items", JSONArray(itemNames))
                 put("quantityEnabled", includeQty)
@@ -1216,7 +1217,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(serverIp, 5001), 5000)
+                socket.connect(InetSocketAddress(endpoint.host, endpoint.port), 5000)
                 socket.getOutputStream().write(json.toString().toByteArray(Charsets.UTF_8))
                 socket.getOutputStream().flush()
             }
@@ -1294,7 +1295,8 @@ class MainActivity : AppCompatActivity() {
         matchingScope.launch(Dispatchers.IO) {
             var success = false
             try {
-                Socket().use { it.connect(InetSocketAddress(ip, 5001), 1000) }
+                val endpoint = parseServerEndpoint(ip)
+                Socket().use { it.connect(InetSocketAddress(endpoint.host, endpoint.port), 1000) }
                 success = true
             } catch (_: Exception) {}
             withContext(Dispatchers.Main) {
@@ -1317,6 +1319,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun isAutoReconnectEnabled(): Boolean =
         getSharedPreferences("config", MODE_PRIVATE).getBoolean("auto_connect", true)
+
+    private data class ServerEndpoint(val host: String, val port: Int)
+
+    private fun parseServerEndpoint(value: String): ServerEndpoint {
+        val trimmed = value.trim()
+        val colonIndex = trimmed.lastIndexOf(':')
+        if (colonIndex > 0 && colonIndex < trimmed.lastIndex) {
+            val host = trimmed.substring(0, colonIndex).trim()
+            val port = trimmed.substring(colonIndex + 1).trim().toIntOrNull()
+            if (host.isNotEmpty() && port != null) {
+                return ServerEndpoint(host, port)
+            }
+        }
+        return ServerEndpoint(trimmed, 5001)
+    }
 
     private fun vibrateFeedback(duration: Long) {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

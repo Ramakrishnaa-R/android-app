@@ -64,10 +64,11 @@ object MedicineNameResolver {
 
     /** Build a short query for [Matcher] — not the full OCR blob. */
     fun buildSearchQuery(ocrText: String): String {
-        val upper = ocrText.uppercase(Locale.ROOT)
+        val correctedOcr = NumericOcrCorrector.correct(ocrText)
+        val upper = correctedOcr.uppercase(Locale.ROOT)
         if (upper.contains("ALKALIZER") || upper.contains("ALKAFLOW")) return "ALKALIZER"
 
-        DOLO_IN_TEXT.find(ocrText)?.let { return "DOLO 650" }
+        DOLO_IN_TEXT.find(correctedOcr)?.let { return "DOLO 650" }
 
         normalizeKnownStrengthOcr(upper)?.let { return it }
 
@@ -75,7 +76,7 @@ object MedicineNameResolver {
 
         detectAlkalizerBrand(compact)?.let { return it }
 
-        extractDoloBrand(compact, ocrText)?.let { return it }
+        extractDoloBrand(compact, correctedOcr)?.let { return it }
 
         extractBrandStrengthFromCompact(compact)?.let { return it }
 
@@ -84,14 +85,14 @@ object MedicineNameResolver {
         val fromIndex = findIndexedWordsInCompact(compact)
         if (fromIndex.isNotBlank()) return fromIndex
 
-        if (INGREDIENT_IN_TEXT.containsMatchIn(ocrText) &&
-            !DOLO_IN_TEXT.containsMatchIn(ocrText) &&
+        if (INGREDIENT_IN_TEXT.containsMatchIn(correctedOcr) &&
+            !DOLO_IN_TEXT.containsMatchIn(correctedOcr) &&
             !DOLO_OCR.containsMatchIn(compact)
         ) {
             return ""
         }
 
-        val spaced = ocrText.uppercase(Locale.ROOT)
+        val spaced = correctedOcr.uppercase(Locale.ROOT)
             .replace(Regex("[^A-Z0-9 \\-]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -164,7 +165,8 @@ object MedicineNameResolver {
         maxResults: Int,
         allowRawFallback: Boolean = true
     ): Resolved {
-        Log.d(TAG, "RESOLVE: queries=$queries (from ${ocrText.take(80)}…)")
+        val correctedOcr = NumericOcrCorrector.correct(ocrText)
+        Log.d(TAG, "RESOLVE: queries=$queries (from ${correctedOcr.take(80)}…)")
 
         var bestMatches = emptyList<Matcher.ScoredMatch>()
         var bestQuery = ""
@@ -182,8 +184,8 @@ object MedicineNameResolver {
         }
 
         if (bestMatches.isEmpty() && allowRawFallback && queries.isNotEmpty()) {
-            bestMatches = Matcher.findTopMatches(ocrText, blacklist, maxResults)
-            bestQuery = ocrText.take(40)
+            bestMatches = Matcher.findTopMatches(correctedOcr, blacklist, maxResults)
+            bestQuery = correctedOcr.take(40)
         }
 
         bestMatches = filterPlausibleMatches(bestQuery, bestMatches)
@@ -227,17 +229,19 @@ object MedicineNameResolver {
     }
 
     private fun buildSearchQueries(ocrText: String): List<String> {
-        val primary = buildSearchQuery(ocrText)
+        val correctedOcr = NumericOcrCorrector.correct(ocrText)
+        val primary = buildSearchQuery(correctedOcr)
         val list = mutableListOf<String>()
         if (primary.isNotBlank()) list.add(primary)
 
-        val compact = ocrText.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
+        val compact = correctedOcr.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
         if (compact.contains("650") && (DOLO_OCR.containsMatchIn(compact) || compact.contains("DOLO"))) {
             list.add("DOLO 650")
             list.add("DOLO 650MG TAB")
         }
-        if (INGREDIENT_IN_TEXT.containsMatchIn(ocrText) &&
-            (compact.contains("650") || ocrText.contains("650"))
+        if (primary.isBlank() &&
+            INGREDIENT_IN_TEXT.containsMatchIn(correctedOcr) &&
+            (compact.contains("650") || correctedOcr.contains("650"))
         ) {
             list.add("DOLO 650")
             list.add("DOLOPAR 650")
@@ -277,11 +281,6 @@ object MedicineNameResolver {
             return "DOLO 650"
         }
         if (compact.contains("650") && compact.contains("OLO")) return "DOLO 650"
-        if (INGREDIENT_IN_TEXT.containsMatchIn(raw) &&
-            (compact.contains("650") || raw.contains("650"))
-        ) {
-            return "DOLO 650"
-        }
         return null
     }
 
