@@ -15,10 +15,21 @@
             android:textSize="14sp"
             android:paddingBottom="8dp"/>
 
-        <ImageView
-            android:id="@+id/stepImage"
-            android:layout_width="match_parent"
-            android:layout_height="200dp"
-            android:scaleType="fitCenter"/>
+        <!-- Square container matching the on-screen green scan box -->
+        <FrameLayout
+            android:id="@+id/imageContainer"
+            android:layout_width="260dp"
+            android:layout_height="260dp"
+            android:layout_gravity="center_horizontal"
+            android:background="#2A4CAF50"
+            android:padding="2dp">
+
+            <ImageView
+                android:id="@+id/stepImage"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="centerCrop"/>
+
+        </FrameLayout>
 
     </LinearLayout>

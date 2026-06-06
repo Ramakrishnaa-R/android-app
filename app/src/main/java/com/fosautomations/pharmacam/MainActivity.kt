@@ -84,6 +84,7 @@ class MainActivity : AppCompatActivity() {
     private var lastSearchQuery: String? = null
     private var lastNormalizationStatus: String? = null
 
+    private val ocrSemaphore = kotlinx.coroutines.sync.Semaphore(3)
     private lateinit var cameraExecutor: ExecutorService
     private val matchingScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -278,6 +279,13 @@ class MainActivity : AppCompatActivity() {
         binding.statusText.setTextColor("#FF9800".toColorInt())
         binding.btnShutter.isEnabled = false
 
+        val viewWidth = binding.previewView.width.toFloat()
+        val viewHeight = binding.previewView.height.toFloat()
+        val boxLeft = binding.scanBox.left.toFloat()
+        val boxTop = binding.scanBox.top.toFloat()
+        val boxRight = binding.scanBox.right.toFloat()
+        val boxBottom = binding.scanBox.bottom.toFloat()
+
         capture.takePicture(
             cameraExecutor,
             object : ImageCapture.OnImageCapturedCallback() {
@@ -319,17 +327,46 @@ class MainActivity : AppCompatActivity() {
                         scanStartTime = System.currentTimeMillis()
                         val debugSaves = mutableListOf<ScanDebugImageSaver.SavedCapture>()
 
-                        // Rhohit: visual pipeline on 1:1 crop + your 3:1 wide OCR in parallel
-                        val squareCrop = LabelOcrHelper.cropCenterSquare(bitmap)
-                        val wideCrop = LabelOcrHelper.cropCenterWide3x1(bitmap)
+                        // Projection crop matching the green scanBox
+                        val bmpWidth = bitmap.width.toFloat()
+                        val bmpHeight = bitmap.height.toFloat()
+                        val scale: Float
+                        val dx: Float
+                        val dy: Float
+                        val viewRatio = viewWidth / viewHeight
+                        val bmpRatio = bmpWidth / bmpHeight
+
+                        if (bmpRatio > viewRatio) {
+                            scale = viewHeight / bmpHeight
+                            val scaledWidth = bmpWidth * scale
+                            dx = (scaledWidth - viewWidth) / 2f
+                            dy = 0f
+                        } else {
+                            scale = viewWidth / bmpWidth
+                            val scaledHeight = bmpHeight * scale
+                            dx = 0f
+                            dy = (scaledHeight - viewHeight) / 2f
+                        }
+
+                        val leftBmp = ((boxLeft + dx) / scale).toInt().coerceIn(0, bitmap.width)
+                        val topBmp = ((boxTop + dy) / scale).toInt().coerceIn(0, bitmap.height)
+                        val rightBmp = ((boxRight + dx) / scale).toInt().coerceIn(0, bitmap.width)
+                        val bottomBmp = ((boxBottom + dy) / scale).toInt().coerceIn(0, bitmap.height)
+
+                        val cropW = (rightBmp - leftBmp).coerceAtLeast(1)
+                        val cropH = (bottomBmp - topBmp).coerceAtLeast(1)
+
+                        val squareCrop = Bitmap.createBitmap(bitmap, leftBmp, topBmp, cropW, cropH)
+                        val wideCrop = LabelOcrHelper.cropCenterWide3x1(squareCrop)
                         bitmap.recycle()
+
                         val squareForDebug = squareCrop.copy(Bitmap.Config.ARGB_8888, false)
                         val wideForDebug = wideCrop.copy(Bitmap.Config.ARGB_8888, false)
                         BitmapHolder.bitmap = squareForDebug
                         BitmapHolder.wideBitmap = wideForDebug
                         Log.d(
                             TAG,
-                            "OCR crops: 1x1=${squareCrop.width}x${squareCrop.height} " +
+                            "OCR projection crops: 1x1=${squareCrop.width}x${squareCrop.height} " +
                                 "3x1=${wideCrop.width}x${wideCrop.height}"
                         )
 
@@ -360,40 +397,64 @@ class MainActivity : AppCompatActivity() {
                         pendingOcrResult = null
 
                         matchingScope.launch {
-                            val squareResult = async(Dispatchers.Default) { recognizeCrop(squareCrop) }
-                            val wideResult = async(Dispatchers.Default) { recognizeCrop(wideCrop) }
-                            val square = squareResult.await()
-                            val wide = wideResult.await()
-                            val best = LabelOcrHelper.pickBest(square, wide)
-                            pendingWideOcrText = wide.fullText.ifBlank { wide.matchText }
-                            val primaryText = best.fullText.ifBlank { best.matchText }
-                            if (primaryText.length >= 3) {
-                                pendingOcrResult = primaryText
-                            }
-                            val wideText = pendingWideOcrText.orEmpty()
+                            try {
+                                val consensus = processMultiFilterCrops(squareCrop, wideCrop)
 
-                            withContext(Dispatchers.Main) {
-                                finishCapture()
-                                startActivityForResult(
-                                    Intent(
+                                val bestSquare = consensus.bestSquareResult.ocrResult
+                                val bestWide = consensus.bestWideResult.ocrResult
+
+                                pendingWideOcrText = bestWide.fullText.ifBlank { bestWide.matchText }
+                                val primaryText = bestSquare.fullText.ifBlank { bestSquare.matchText }
+                                if (primaryText.length >= 3) {
+                                    pendingOcrResult = primaryText
+                                }
+                                val wideText = pendingWideOcrText.orEmpty()
+
+                                withContext(Dispatchers.Main) {
+                                    finishCapture()
+                                    startActivityForResult(
+                                        Intent(
+                                            this@MainActivity,
+                                            ImageProcessingActivity::class.java
+                                        ).apply {
+                                            putExtra(
+                                                ImageProcessingActivity.EXTRA_PRIMARY_OCR,
+                                                primaryText
+                                            )
+                                            putExtra(
+                                                ImageProcessingActivity.EXTRA_WIDE_OCR,
+                                                wideText
+                                            )
+                                            putStringArrayListExtra(
+                                                ImageProcessingActivity.EXTRA_BLACKLIST,
+                                                ArrayList(blacklist)
+                                            )
+                                        },
+                                        REQUEST_IMAGE_PROCESSING
+                                    )
+                                }
+                            } catch (e: CancellationException) {
+                                // TimeoutCancellationException is a CancellationException;
+                                // catch it here so finishCapture() is guaranteed to run.
+                                Log.w(TAG, "SHUTTER: OCR pipeline timed out or cancelled")
+                                withContext(Dispatchers.Main) {
+                                    finishCapture()
+                                    Toast.makeText(
                                         this@MainActivity,
-                                        ImageProcessingActivity::class.java
-                                    ).apply {
-                                        putExtra(
-                                            ImageProcessingActivity.EXTRA_PRIMARY_OCR,
-                                            primaryText
-                                        )
-                                        putExtra(
-                                            ImageProcessingActivity.EXTRA_WIDE_OCR,
-                                            wideText
-                                        )
-                                        putStringArrayListExtra(
-                                            ImageProcessingActivity.EXTRA_BLACKLIST,
-                                            ArrayList(blacklist)
-                                        )
-                                    },
-                                    REQUEST_IMAGE_PROCESSING
-                                )
+                                        "Scan took too long — tap again",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "SHUTTER: OCR pipeline failed", e)
+                                withContext(Dispatchers.Main) {
+                                    finishCapture()
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "OCR failed — tap again",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
                             }
                         }
 
@@ -488,20 +549,63 @@ class MainActivity : AppCompatActivity() {
                         "3x1=${wideCrop.width}x${wideCrop.height}"
                 )
 
-                val squareDeferred = async(Dispatchers.Default) { recognizeCrop(squareCrop) }
-                val wideDeferred = async(Dispatchers.Default) { recognizeCrop(wideCrop) }
-                val square = squareDeferred.await()
-                val wide = wideDeferred.await()
-                val best = LabelOcrHelper.pickBest(square, wide)
-                pendingWideOcrText = wide.fullText.ifBlank { wide.matchText }
+                val consensus = processMultiFilterCrops(squareCrop, wideCrop)
+
+                val bestSquare = consensus.bestSquareResult.ocrResult
+                val bestWide = consensus.bestWideResult.ocrResult
+                pendingWideOcrText = bestWide.fullText.ifBlank { bestWide.matchText }
                 val wideText = pendingWideOcrText.orEmpty()
+
+                BitmapHolder.winningFilter = consensus.bestSquareResult.filterName
 
                 withContext(Dispatchers.Main) {
                     binding.loader.visibility = View.GONE
                     if (fromShutter && debugSaves.isNotEmpty()) {
                         ScanDebugImageSaver.showSavedToast(this@MainActivity, debugSaves)
                     }
-                    deliverOcrResult(best, wideText, fromShutter)
+
+                    if (fromShutter) finishCapture()
+
+                    val ocrForMatch = bestSquare.fullText.ifBlank { bestSquare.matchText }
+                    if (ocrForMatch.length >= 3) {
+                        binding.resultTextView.text = getString(R.string.matching_medicine)
+                        binding.resultTextView.setTextColor("#FF9800".toColorInt())
+
+                        if (consensus.resolved != null) {
+                            processScanResult(
+                                resolved = consensus.resolved,
+                                primaryOcr = ocrForMatch,
+                                hintOcr = wideText.takeIf { it.length >= 3 }
+                            )
+                        } else {
+                            processScanResult(
+                                primaryOcr = ocrForMatch,
+                                hintOcr = wideText.takeIf { it.length >= 3 }
+                            )
+                        }
+                    } else {
+                        binding.statusText.text = "Nothing readable — move closer & tap camera"
+                        binding.statusText.setTextColor("#FF9800".toColorInt())
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Could not read text — hold steady and tap green camera",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            } catch (e: CancellationException) {
+                // TimeoutCancellationException from withTimeout — must catch explicitly
+                Log.w(TAG, "OCR pipeline timed out")
+                withContext(Dispatchers.Main) {
+                    binding.loader.visibility = View.GONE
+                    if (fromShutter) finishCapture()
+                    binding.statusText.text = "Scan timed out — tap again"
+                    binding.statusText.setTextColor("#FF9800".toColorInt())
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Scan took too long — tap again",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "OCR pipeline failed", e)
@@ -512,7 +616,7 @@ class MainActivity : AppCompatActivity() {
                     binding.statusText.setTextColor("#F44336".toColorInt())
                     Toast.makeText(
                         this@MainActivity,
-                        "OCR failed — tap green camera again",
+                        "OCR failed \u2014 tap green camera again",
                         Toast.LENGTH_LONG
                     ).show()
                 }
@@ -522,25 +626,232 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun recognizeCrop(crop: Bitmap): LabelOcrHelper.OcrResult {
-        val rhohitPrepared = withContext(Dispatchers.Default) {
-            ImageUtils.removeSpecularHighlights(ImageUtils.toGrayscale(crop))
+    private suspend fun processMultiFilterCrops(
+        squareCrop: Bitmap,
+        wideCrop: Bitmap
+    ): ConsensusResult = withContext(Dispatchers.Default) {
+        // 180-second hard cap (3 minutes) — ensures we never timeout under normal usage.
+        withTimeout(180_000L) {
+            val progressCounter = java.util.concurrent.atomic.AtomicInteger(0)
+            val updateProgress = suspend {
+                val completed = progressCounter.incrementAndGet()
+                withContext(Dispatchers.Main) {
+                    binding.statusText.text = "Reading label: running filter $completed/12…"
+                }
+            }
+
+            val squareDeferred = async { recognizeMultiFilter(squareCrop, isWide = false, updateProgress) }
+            val wideDeferred   = async { recognizeMultiFilter(wideCrop,   isWide = true,  updateProgress) }
+            val squareResults  = squareDeferred.await()
+            val wideResults    = wideDeferred.await()
+
+            val ocrMap     = squareResults.associate { it.filterName to (it.ocrResult.fullText.ifBlank { it.ocrResult.matchText }) }
+            val wideOcrMap = wideResults.associate  { it.filterName to (it.ocrResult.fullText.ifBlank { it.ocrResult.matchText }) }
+            BitmapHolder.filterOcrTexts     = ocrMap
+            BitmapHolder.wideFilterOcrTexts = wideOcrMap
+
+            computeConsensus(squareResults, wideResults)
         }
-        crop.recycle()
-        val prepared = LabelOcrHelper.prepareForOcr(rhohitPrepared)
-        if (rhohitPrepared !== prepared) rhohitPrepared.recycle()
-        val primary = recognizePrepared(prepared)
-        if (!LabelOcrHelper.needsFallback(primary)) {
-            prepared.recycle()
-            return primary
-        }
-        Log.d(TAG, "OCR: binarized fallback on crop ${prepared.width}x${prepared.height}")
-        val binarized = LabelOcrHelper.preprocessBinarized(prepared)
-        prepared.recycle()
-        val secondary = recognizePrepared(binarized)
-        binarized.recycle()
-        return LabelOcrHelper.pickBetter(primary, secondary)
     }
+
+    private suspend fun recognizeMultiFilter(
+        crop: Bitmap,
+        isWide: Boolean,
+        onProgress: suspend () -> Unit
+    ): List<FilterResult> = coroutineScope {
+        val gray    = ImageUtils.toGrayscale(crop)
+        val noGlare = ImageUtils.removeSpecularHighlights(gray)
+
+        if (!isWide) {
+            BitmapHolder.grayscaleBitmap = gray.copy(Bitmap.Config.ARGB_8888, false)
+            BitmapHolder.noGlareBitmap   = noGlare.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        gray.recycle()
+
+        val upscaledBase = LabelOcrHelper.upscaleIfNeeded(noGlare)
+
+        // All 6 filters run in PARALLEL — ML Kit handles concurrent calls fine.
+        // Each gets an 8-second safety timeout so a stuck call never blocks the pipeline.
+        // Use async { withContext(...) } rather than async(Dispatchers.Default) to avoid
+        // Kotlin overload ambiguity when the lambda also calls suspend functions.
+        val standardDeferred = async {
+            withContext(Dispatchers.Default) {
+                val stdInput = upscaledBase.copy(Bitmap.Config.ARGB_8888, false)
+                val stdBmp   = LabelOcrHelper.prepareForOcr(stdInput)
+                val ocr = recognizePreparedSafe(stdBmp)
+                if (!isWide) BitmapHolder.enhancedBitmap = stdBmp.copy(Bitmap.Config.ARGB_8888, false)
+                stdBmp.recycle()
+                onProgress()
+                ocr
+            }
+        }
+
+        val binarizedDeferred = async {
+            withContext(Dispatchers.Default) {
+                val stdInput = upscaledBase.copy(Bitmap.Config.ARGB_8888, false)
+                val stdBmp   = LabelOcrHelper.prepareForOcr(stdInput)
+                val binBmp   = LabelOcrHelper.preprocessBinarized(stdBmp)
+                stdBmp.recycle()
+                val ocr = recognizePreparedSafe(binBmp)
+                if (!isWide) BitmapHolder.binarizedBitmap = binBmp.copy(Bitmap.Config.ARGB_8888, false)
+                binBmp.recycle()
+                onProgress()
+                ocr
+            }
+        }
+
+        val claheDeferred = async {
+            withContext(Dispatchers.Default) {
+                val claheBmp = ImageUtils.applyClahe(upscaledBase)
+                val ocr = recognizePreparedSafe(claheBmp)
+                if (!isWide) BitmapHolder.claheBitmap = claheBmp.copy(Bitmap.Config.ARGB_8888, false)
+                claheBmp.recycle()
+                onProgress()
+                ocr
+            }
+        }
+
+        val gammaBrightDeferred = async {
+            withContext(Dispatchers.Default) {
+                val gbBmp = ImageUtils.applyGamma(upscaledBase, 0.6f)
+                val ocr = recognizePreparedSafe(gbBmp)
+                if (!isWide) BitmapHolder.gammaBrightBitmap = gbBmp.copy(Bitmap.Config.ARGB_8888, false)
+                gbBmp.recycle()
+                onProgress()
+                ocr
+            }
+        }
+
+        val gammaDarkDeferred = async {
+            withContext(Dispatchers.Default) {
+                val gdBmp = ImageUtils.applyGamma(upscaledBase, 1.6f)
+                val ocr = recognizePreparedSafe(gdBmp)
+                if (!isWide) BitmapHolder.gammaDarkBitmap = gdBmp.copy(Bitmap.Config.ARGB_8888, false)
+                gdBmp.recycle()
+                onProgress()
+                ocr
+            }
+        }
+
+        val sharpenDeferred = async {
+            withContext(Dispatchers.Default) {
+                val sharpBmp = ImageUtils.applyStrongSharpen(upscaledBase)
+                val ocr = recognizePreparedSafe(sharpBmp)
+                if (!isWide) BitmapHolder.sharpenBitmap = sharpBmp.copy(Bitmap.Config.ARGB_8888, false)
+                sharpBmp.recycle()
+                onProgress()
+                ocr
+            }
+        }
+
+        val standardOcr    = standardDeferred.await()
+        val binarizedOcr   = binarizedDeferred.await()
+        val claheOcr       = claheDeferred.await()
+        val gammaBrightOcr = gammaBrightDeferred.await()
+        val gammaDarkOcr   = gammaDarkDeferred.await()
+        val sharpenOcr     = sharpenDeferred.await()
+
+        if (upscaledBase !== noGlare) noGlare.recycle()
+        upscaledBase.recycle()
+
+        val list = mutableListOf<FilterResult>()
+        fun addResult(name: String, ocr: LabelOcrHelper.OcrResult) {
+            val text = ocr.fullText.ifBlank { ocr.matchText }
+            val resolved = if (text.length >= 3) {
+                MedicineNameResolver.resolve(text, blacklist)
+            } else null
+            list.add(FilterResult(name, isWide, ocr, resolved))
+        }
+
+        addResult("standard",     standardOcr)
+        addResult("binarized",    binarizedOcr)
+        addResult("clahe",        claheOcr)
+        addResult("gamma-bright", gammaBrightOcr)
+        addResult("gamma-dark",   gammaDarkOcr)
+        addResult("sharpen",      sharpenOcr)
+
+        list
+    }
+
+    /** Calls ML Kit with an 8-second safety timeout; returns empty result on timeout/failure.
+     *  8 s is generous enough for slow devices while still guaranteeing forward progress. */
+    private suspend fun recognizePreparedSafe(bitmap: Bitmap): LabelOcrHelper.OcrResult {
+        ocrSemaphore.acquire()
+        return try {
+            withTimeout(10_000L) { recognizePrepared(bitmap) }
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "OCR timed out for one filter — skipping, others will still run")
+            LabelOcrHelper.OcrResult("", "", emptyList(), 0)
+        } catch (e: Exception) {
+            Log.w(TAG, "OCR failed for one filter: ${e.message}")
+            LabelOcrHelper.OcrResult("", "", emptyList(), 0)
+        } finally {
+            ocrSemaphore.release()
+        }
+    }
+
+    private fun computeConsensus(
+        squareResults: List<FilterResult>,
+        wideResults: List<FilterResult>
+    ): ConsensusResult {
+        val allResults = squareResults + wideResults
+        val validVotes = allResults.filter { it.resolved?.medicine != null && it.resolved.score >= 55.0 }
+
+        if (validVotes.isNotEmpty()) {
+            val groups = validVotes.groupBy { it.resolved!!.medicine!!.id }
+            val sortedGroups = groups.map { (medId, votes) ->
+                val frequency = votes.size
+                val totalScore = votes.sumOf { it.resolved!!.score }
+                val maxLineScore = votes.maxOf { it.ocrResult.lineScore }
+
+                val bestSquare = votes.filter { !it.isWide }.sortedWith(
+                    compareByDescending<FilterResult> { it.resolved!!.score }
+                        .thenByDescending { it.ocrResult.lineScore }
+                ).firstOrNull()
+
+                val bestWide = votes.filter { it.isWide }.sortedWith(
+                    compareByDescending<FilterResult> { it.resolved!!.score }
+                        .thenByDescending { it.ocrResult.lineScore }
+                ).firstOrNull()
+
+                val bestVote = votes.sortedWith(
+                    compareByDescending<FilterResult> { !it.isWide }
+                        .thenByDescending { it.resolved!!.score }
+                        .thenByDescending { it.ocrResult.lineScore }
+                ).first()
+
+                GroupSummary(
+                    medId = medId,
+                    frequency = frequency,
+                    totalScore = totalScore,
+                    maxLineScore = maxLineScore,
+                    bestSquare = bestSquare ?: bestVote,
+                    bestWide = bestWide ?: bestVote,
+                    resolved = bestVote.resolved!!
+                )
+            }.sortedWith(
+                compareByDescending<GroupSummary> { it.frequency }
+                    .thenByDescending { it.totalScore }
+                    .thenByDescending { it.maxLineScore }
+            )
+
+            val bestGroup = sortedGroups.first()
+            return ConsensusResult(
+                bestSquareResult = bestGroup.bestSquare,
+                bestWideResult = bestGroup.bestWide,
+                resolved = bestGroup.resolved
+            )
+        } else {
+            val bestSquare = squareResults.maxByOrNull { it.ocrResult.lineScore } ?: squareResults.first()
+            val bestWide = wideResults.maxByOrNull { it.ocrResult.lineScore } ?: wideResults.first()
+            return ConsensusResult(
+                bestSquareResult = bestSquare,
+                bestWideResult = bestWide,
+                resolved = null
+            )
+        }
+    }
+
 
     private suspend fun recognizePrepared(bitmap: Bitmap): LabelOcrHelper.OcrResult =
         suspendCancellableCoroutine { cont ->
@@ -552,6 +863,29 @@ class MainActivity : AppCompatActivity() {
                     if (cont.isActive) cont.resumeWithException(e)
                 }
         }
+
+    private data class FilterResult(
+        val filterName: String,
+        val isWide: Boolean,
+        val ocrResult: LabelOcrHelper.OcrResult,
+        val resolved: MedicineNameResolver.Resolved?
+    )
+
+    private class ConsensusResult(
+        val bestSquareResult: FilterResult,
+        val bestWideResult: FilterResult,
+        val resolved: MedicineNameResolver.Resolved?
+    )
+
+    private data class GroupSummary(
+        val medId: String,
+        val frequency: Int,
+        val totalScore: Double,
+        val maxLineScore: Int,
+        val bestSquare: FilterResult,
+        val bestWide: FilterResult,
+        val resolved: MedicineNameResolver.Resolved
+    )
 
     private fun deliverOcrResult(
         result: LabelOcrHelper.OcrResult,
@@ -899,13 +1233,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun processScanResult(primaryOcr: String, hintOcr: String?) {
         if (primaryOcr.length < 3) return
+        matchingScope.launch(Dispatchers.Default) {
+            val resolved = MedicineNameResolver.resolveForScan(primaryOcr, hintOcr, blacklist, 3)
+            withContext(Dispatchers.Main) {
+                processScanResult(resolved, primaryOcr, hintOcr)
+            }
+        }
+    }
+
+    private fun processScanResult(resolved: MedicineNameResolver.Resolved, primaryOcr: String, hintOcr: String?) {
         lastOcrRaw = primaryOcr
-        Log.d("MATCHER_DEBUG", "processScanResult primary='$primaryOcr' hint='${hintOcr?.take(60)}'")
+        Log.d("MATCHER_DEBUG", "processScanResult pre-resolved primary='$primaryOcr' hint='${hintOcr?.take(60)}'")
         Log.d("MATCHER_DEBUG", Matcher.debugInput(primaryOcr))
 
         val normalized = Matcher.normalize(primaryOcr)
-        val searchQuery = MedicineNameResolver.buildSearchQuery(primaryOcr)
-            .ifBlank { hintOcr?.let { MedicineNameResolver.buildSearchQuery(it) }.orEmpty() }
+        val searchQuery = resolved.searchQuery
         lastNormalizationStatus = normalizationStatusLine(normalized, searchQuery)
 
         runOnUiThread {
@@ -922,7 +1264,6 @@ class MainActivity : AppCompatActivity() {
 
         isMatching = true
         matchingScope.launch(Dispatchers.Default) {
-            val resolved = MedicineNameResolver.resolveForScan(primaryOcr, hintOcr, blacklist, 3)
             lastSearchQuery = resolved.searchQuery
             val scanTime = System.currentTimeMillis() - scanStartTime
 

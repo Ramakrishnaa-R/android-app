@@ -5,6 +5,39 @@ import java.util.Locale
 
 object NumericOcrCorrector {
 
+    fun cleanOcrText(raw: String): String {
+        var text = raw.uppercase(Locale.ROOT)
+
+        // Strip pharmacy branding first — order matters (longest match first)
+        val brandingPatterns = listOf(
+            "PHARMEASY", "NARMEASY", "ARMEASY",  // PharmEasy variants
+            "NETMEDS", "TATA1MG", "MEDLIFE", "APOLLO", "ZOYLO"
+        )
+        for (brand in brandingPatterns) {
+            text = text.replace(brand, " ")
+        }
+
+        // Remove colons that OCR inserts between brand and strength (Raxo:20 → RAXO 20)
+        // Do this BEFORE splitting so we don't corrupt digit sequences
+        text = text.replace(Regex("""([A-Z])(:)(\d)"""), "$1 $3")
+
+        // Split letter-digit and digit-letter boundaries to get clean tokens
+        text = text.replace(Regex("""([A-Z])(\d)"""), "$1 $2")
+        text = text.replace(Regex("""(\d)([A-Z])"""), "$1 $2")
+
+        // Apply word-level brand corrections on individual tokens
+        val correctedTokens = text.split(Regex("""\s+""")).map { token ->
+            when (token.trim()) {
+                "RAXO", "RAX", "RAX0", "ROZO", "RAZOO", "REZO", "REBO", "RABOZ", "RABOA" -> "RAZO"
+                "RABELPRAZOLE", "RABEPRAZOL", "RABEPRAZLE" -> "RABEPRAZOLE"
+                else -> token
+            }
+        }
+
+        return correctedTokens.joinToString(" ").replace(Regex("""\s{2,}"""), " ").trim()
+    }
+
+
     private val strengths = setOf(
         "1", "2", "2.5", "3", "4", "5", "6", "8", "10",
         "12.5", "15", "20", "25", "30", "40", "50",

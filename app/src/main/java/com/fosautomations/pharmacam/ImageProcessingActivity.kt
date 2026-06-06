@@ -72,33 +72,114 @@ class ImageProcessingActivity : AppCompatActivity() {
     private suspend fun runPipeline(original: Bitmap) {
         val container = findViewById<LinearLayout>(R.id.stepsContainer)
 
-        showStep(container, "📷 Original Capture (1:1)", original)
-        delay(500)
+        // Show the original capture (already cropped perfectly to the scan zone)
+        val originalCopy = original.copy(Bitmap.Config.ARGB_8888, false)
+        showStep(container, "📷 Original Capture (scan zone)", originalCopy)
+        delay(300)
 
-        val grayscale = withContext(Dispatchers.Default) {
-            ImageUtils.toGrayscale(original)
+        // Grayscale
+        val grayscaleSnap = BitmapHolder.grayscaleBitmap
+        val grayscale = if (grayscaleSnap != null && !grayscaleSnap.isRecycled) {
+            grayscaleSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            withContext(Dispatchers.Default) { ImageUtils.toGrayscale(original) }
         }
         showStep(container, "🔲 Grayscale", grayscale)
-        delay(500)
+        delay(300)
 
-        val noGlare = withContext(Dispatchers.Default) {
-            ImageUtils.removeSpecularHighlights(grayscale)
+        // Glare Removed
+        val noGlareSnap = BitmapHolder.noGlareBitmap
+        val noGlare = if (noGlareSnap != null && !noGlareSnap.isRecycled) {
+            noGlareSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            withContext(Dispatchers.Default) { ImageUtils.removeSpecularHighlights(grayscale) }
         }
-        if (grayscale !== noGlare) grayscale.recycle()
         showStep(container, "✨ Glare Removed", noGlare)
-        delay(500)
+        delay(300)
 
-        val thresholded = withContext(Dispatchers.Default) {
-            ImageUtils.adaptiveThreshold(noGlare)
+        // Standard Enhanced
+        val stdSnap = BitmapHolder.enhancedBitmap
+        val standard = if (stdSnap != null && !stdSnap.isRecycled) {
+            stdSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            withContext(Dispatchers.Default) { LabelOcrHelper.prepareForOcr(noGlare.copy(Bitmap.Config.ARGB_8888, false)) }
         }
-        showStep(container, "⬛ Adaptive Threshold", thresholded)
-        delay(500)
+        showStep(container, "⚡ Enhanced (Standard)", standard)
+        val stdText = BitmapHolder.filterOcrTexts?.get("standard") ?: ""
+        showTextStep(container, "📝 Standard OCR Text", stdText.ifBlank { "(no text)" })
+        delay(300)
 
-        val binarized = withContext(Dispatchers.Default) {
-            ImageUtils.preprocessForOCR(noGlare)
+        // Binarized Enhanced
+        val binSnap = BitmapHolder.binarizedBitmap
+        val binarized = if (binSnap != null && !binSnap.isRecycled) {
+            binSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            withContext(Dispatchers.Default) { LabelOcrHelper.preprocessBinarized(standard.copy(Bitmap.Config.ARGB_8888, false)) }
         }
-        showStep(container, "🔤 Binarized (debug view)", binarized)
-        delay(500)
+        showStep(container, "🔤 Enhanced (Binarized)", binarized)
+        val binText = BitmapHolder.filterOcrTexts?.get("binarized") ?: ""
+        showTextStep(container, "📝 Binarized OCR Text", binText.ifBlank { "(no text)" })
+        delay(300)
+
+        // CLAHE
+        val claheSnap = BitmapHolder.claheBitmap
+        val clahe = if (claheSnap != null && !claheSnap.isRecycled) {
+            claheSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            val up = withContext(Dispatchers.Default) { LabelOcrHelper.upscaleIfNeeded(noGlare.copy(Bitmap.Config.ARGB_8888, false)) }
+            val ret = withContext(Dispatchers.Default) { ImageUtils.applyClahe(up) }
+            up.recycle()
+            ret
+        }
+        showStep(container, "🌓 Enhanced (CLAHE)", clahe)
+        val claheText = BitmapHolder.filterOcrTexts?.get("clahe") ?: ""
+        showTextStep(container, "📝 CLAHE OCR Text", claheText.ifBlank { "(no text)" })
+        delay(300)
+
+        // Gamma Bright
+        val gbSnap = BitmapHolder.gammaBrightBitmap
+        val gammaBright = if (gbSnap != null && !gbSnap.isRecycled) {
+            gbSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            val up = withContext(Dispatchers.Default) { LabelOcrHelper.upscaleIfNeeded(noGlare.copy(Bitmap.Config.ARGB_8888, false)) }
+            val ret = withContext(Dispatchers.Default) { ImageUtils.applyGamma(up, 0.6f) }
+            up.recycle()
+            ret
+        }
+        showStep(container, "☀️ Enhanced (Gamma Bright)", gammaBright)
+        val gbText = BitmapHolder.filterOcrTexts?.get("gamma-bright") ?: ""
+        showTextStep(container, "📝 Gamma Bright OCR Text", gbText.ifBlank { "(no text)" })
+        delay(300)
+
+        // Gamma Dark
+        val gdSnap = BitmapHolder.gammaDarkBitmap
+        val gammaDark = if (gdSnap != null && !gdSnap.isRecycled) {
+            gdSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            val up = withContext(Dispatchers.Default) { LabelOcrHelper.upscaleIfNeeded(noGlare.copy(Bitmap.Config.ARGB_8888, false)) }
+            val ret = withContext(Dispatchers.Default) { ImageUtils.applyGamma(up, 1.6f) }
+            up.recycle()
+            ret
+        }
+        showStep(container, "🌙 Enhanced (Gamma Dark)", gammaDark)
+        val gdText = BitmapHolder.filterOcrTexts?.get("gamma-dark") ?: ""
+        showTextStep(container, "📝 Gamma Dark OCR Text", gdText.ifBlank { "(no text)" })
+        delay(300)
+
+        // Strong Sharpen
+        val sharpSnap = BitmapHolder.sharpenBitmap
+        val sharpen = if (sharpSnap != null && !sharpSnap.isRecycled) {
+            sharpSnap.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            val up = withContext(Dispatchers.Default) { LabelOcrHelper.upscaleIfNeeded(noGlare.copy(Bitmap.Config.ARGB_8888, false)) }
+            val ret = withContext(Dispatchers.Default) { ImageUtils.applyStrongSharpen(up) }
+            up.recycle()
+            ret
+        }
+        showStep(container, "🎯 Enhanced (Strong Sharpen)", sharpen)
+        val sharpText = BitmapHolder.filterOcrTexts?.get("sharpen") ?: ""
+        showTextStep(container, "📝 Strong Sharpen OCR Text", sharpText.ifBlank { "(no text)" })
+        delay(300)
 
         findViewById<ProgressBar>(R.id.loader).visibility = View.GONE
 
@@ -106,7 +187,6 @@ class ImageProcessingActivity : AppCompatActivity() {
             MedicineRepository.loadIfNeeded(this@ImageProcessingActivity)
         }
 
-        // OCR from MainActivity shutter — not re-run here (Rhohit re-OCR was hurting accuracy).
         var squareOcr = intent.getStringExtra(EXTRA_PRIMARY_OCR)?.trim()
             ?: MainActivity.pendingOcrResult?.trim().orEmpty()
         var wideOcr = intent.getStringExtra(EXTRA_WIDE_OCR)?.trim()
@@ -120,12 +200,10 @@ class ImageProcessingActivity : AppCompatActivity() {
         }
 
         if (squareOcr.length < 3) {
-            squareOcr = recognizeDebugBitmap(original)
+            squareOcr = stdText
         }
         if (wideOcr.length < 3) {
-            BitmapHolder.wideBitmap?.let { wideBitmap ->
-                wideOcr = recognizeDebugBitmap(wideBitmap)
-            }
+            wideOcr = BitmapHolder.wideFilterOcrTexts?.get("standard").orEmpty()
         }
         resultPrimaryOcr = squareOcr
         resultWideOcr = wideOcr
@@ -141,8 +219,14 @@ class ImageProcessingActivity : AppCompatActivity() {
             findViewById<Button>(R.id.btnClose).visibility = View.VISIBLE
         }
 
-        if (binarized !== noGlare) binarized.recycle()
+        if (grayscale !== noGlare) grayscale.recycle()
         noGlare.recycle()
+        standard.recycle()
+        binarized.recycle()
+        clahe.recycle()
+        gammaBright.recycle()
+        gammaDark.recycle()
+        sharpen.recycle()
     }
 
     private suspend fun recognizeDebugBitmap(bitmap: Bitmap): String {
@@ -266,7 +350,7 @@ class ImageProcessingActivity : AppCompatActivity() {
     private fun showTextStep(container: LinearLayout, label: String, text: String) {
         val stepView = layoutInflater.inflate(R.layout.item_processing_step, container, false)
         stepView.findViewById<TextView>(R.id.stepLabel).text = label
-        stepView.findViewById<ImageView>(R.id.stepImage).visibility = View.GONE
+        stepView.findViewById<View>(R.id.imageContainer).visibility = View.GONE
         val tv = TextView(this).apply {
             this.text = text
             setTextColor(android.graphics.Color.parseColor("#E0E0E0"))
@@ -282,7 +366,7 @@ class ImageProcessingActivity : AppCompatActivity() {
     private fun showHighlightStep(container: LinearLayout, label: String, text: String) {
         val stepView = layoutInflater.inflate(R.layout.item_processing_step, container, false)
         stepView.findViewById<TextView>(R.id.stepLabel).text = label
-        stepView.findViewById<ImageView>(R.id.stepImage).visibility = View.GONE
+        stepView.findViewById<View>(R.id.imageContainer).visibility = View.GONE
         val tv = TextView(this).apply {
             this.text = text
             setTextColor(android.graphics.Color.parseColor("#A5D6A7"))
@@ -310,6 +394,7 @@ class ImageProcessingActivity : AppCompatActivity() {
     private fun showStep(container: LinearLayout, label: String, bitmap: Bitmap) {
         val stepView = layoutInflater.inflate(R.layout.item_processing_step, container, false)
         stepView.findViewById<TextView>(R.id.stepLabel).text = label
+        stepView.findViewById<View>(R.id.imageContainer).visibility = View.VISIBLE
         stepView.findViewById<ImageView>(R.id.stepImage).setImageBitmap(bitmap)
         container.addView(stepView)
         scrollToBottom()
@@ -349,6 +434,7 @@ class ImageProcessingActivity : AppCompatActivity() {
         scope.cancel()
         BitmapHolder.bitmap = null
         BitmapHolder.wideBitmap = null
+        BitmapHolder.clearPipelineSnapshots()
     }
 
     @Deprecated("Deprecated in Android API; keeps hardware Back behavior aligned with Close.")

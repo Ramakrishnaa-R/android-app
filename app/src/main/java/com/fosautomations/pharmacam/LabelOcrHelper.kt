@@ -237,7 +237,7 @@ object LabelOcrHelper {
             else -> a
         }
 
-    private fun upscaleIfNeeded(source: Bitmap): Bitmap {
+    fun upscaleIfNeeded(source: Bitmap): Bitmap {
         if (source.width >= MIN_OCR_WIDTH) return source
         val scale = MIN_OCR_WIDTH.toFloat() / source.width
         val newW = MIN_OCR_WIDTH
@@ -264,7 +264,7 @@ object LabelOcrHelper {
     }
 
     /** Light 3×3 sharpen on luminance. */
-    private fun sharpenLight(source: Bitmap): Bitmap {
+    fun sharpenLight(source: Bitmap): Bitmap {
         val w = source.width
         val h = source.height
         if (w < 3 || h < 3) return source

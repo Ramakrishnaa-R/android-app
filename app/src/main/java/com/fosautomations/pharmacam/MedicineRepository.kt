@@ -62,6 +62,19 @@ object MedicineRepository {
         }
     }
 
+    fun loadForTest(medicines: List<String>) {
+        synchronized(database) {
+            database.clear()
+            invertedIndex.clear()
+            categoryIndex.clear()
+            medicines.forEach { name ->
+                val med = Medicine(name, UUID.randomUUID().toString())
+                addInternalLocked(med)
+            }
+            isLoaded = true
+        }
+    }
+
     private fun parseJsonArray(jsonArray: JSONArray) {
         synchronized(database) {
             database.clear()
@@ -93,12 +106,47 @@ object MedicineRepository {
         }
     }
 
+    private fun fuseShortTokens(tokens: List<String>): List<String> {
+        val result = mutableListOf<String>()
+        var i = 0
+        while (i < tokens.size) {
+            val token = tokens[i]
+            if (token.length < 3 && i + 1 < tokens.size) {
+                val next = tokens[i + 1]
+                if (!next.all { it.isDigit() } && !token.all { it.isDigit() }) {
+                    result.add(token + next)
+                    if (next.length < 3 && i + 2 < tokens.size) {
+                        val third = tokens[i + 2]
+                        if (!third.all { it.isDigit() }) {
+                            result.add(token + next + third)
+                        }
+                    }
+                }
+            }
+            result.add(token)
+            i++
+        }
+        return result
+    }
+
     fun tokenize(text: String): List<String> {
-        return text.uppercase(Locale.ROOT)
-            .replace("-", " ")
-            .replace("[^A-Z0-9 ]".toRegex(), "")
+        val rawUpper = text.uppercase(Locale.ROOT)
+        val spaceSplit = rawUpper.replace("[^A-Z0-9 \\-]".toRegex(), "")
             .split("\\s+".toRegex())
             .filter { it.isNotEmpty() }
+        
+        val splitHyphens = spaceSplit.flatMap { token ->
+            if (token.contains("-")) {
+                val parts    = token.split("-").filter { it.isNotEmpty() }
+                val noHyphen = token.replace("-", "")
+                if (noHyphen.isNotEmpty()) parts + noHyphen else parts
+            } else {
+                listOf(token)
+            }
+        }
+        
+        val fused = fuseShortTokens(splitHyphens)
+        return fused.map { it.replace("[^A-Z0-9]".toRegex(), "") }.filter { it.isNotEmpty() }
     }
 
     suspend fun addMedicine(context: Context, medicine: Medicine) {

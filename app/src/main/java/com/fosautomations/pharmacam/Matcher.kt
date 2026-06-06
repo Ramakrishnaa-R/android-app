@@ -44,6 +44,9 @@ private val ALIASES: Map<String, List<String>> = mapOf(
     "RABLET"     to listOf("RABEPRAZOLE"),
     "ALKALIZER"  to listOf("ALKAZAR", "ALKAFLOW", "LIAFLOR"),
     "ALKOF"      to listOf("COFGELS", "COFGEL"),
+    "TBACT"      to listOf("MUPIROCIN", "MUPROCIN", "MUPTROCIN"),
+    "TGEL"       to listOf("TAZAROTENE"),
+    "TRET"       to listOf("TRETINOIN"),
 )
 
 private val OCR_WORD_CORRECTIONS = mapOf(
@@ -92,6 +95,16 @@ private val OCR_WORD_CORRECTIONS = mapOf(
     "DYLO" to "DOLO",
     "ALKAFLOW" to "ALKALIZER",
     "LIAFLOR" to "ALKALIZER",
+    "RAXO" to "RAZO",
+    "RAX" to "RAZO",
+    "RAX0" to "RAZO",
+    "ROZO" to "RAZO",
+    "REZO" to "RAZO",
+    "REBO" to "RAZO",
+    "NARMEASY" to "",
+    "ARMEASY" to "",
+    "PHARMEASY" to "",
+    "NETMEDS" to "",
 )
 
 private val VOWELS = setOf('A', 'E', 'I', 'O', 'U')
@@ -105,6 +118,40 @@ private fun isGibberish(token: String): Boolean {
     val vowelCount = token.count { it in VOWELS }
     val vowelRatio = vowelCount.toDouble() / token.length
     return vowelRatio < 0.10
+}
+
+// ---------------------------------------------------------------------------
+// TOKEN FUSION
+// Merges short-prefix tokens (< 3 chars) with the next token BEFORE the
+// length filter runs. This preserves hyphenated brands like:
+//   T-BACT  → ["T","BACT"] → fuse → also add "TBACT"
+//   A-RET   → ["A","RET"]  → fuse → also add "ARET"
+//   A-TO-Z  → ["A","TO","Z"] → fuse → also add "ATOZ"
+// The original parts are still kept so they participate in normal scoring.
+// ---------------------------------------------------------------------------
+private fun fuseShortTokens(tokens: List<String>): List<String> {
+    val result = mutableListOf<String>()
+    var i = 0
+    while (i < tokens.size) {
+        val token = tokens[i]
+        if (token.length < 3 && i + 1 < tokens.size) {
+            val next = tokens[i + 1]
+            if (!next.all { it.isDigit() } && !token.all { it.isDigit() }) {
+                // Two-token fusion: T + BACT → TBACT
+                result.add(token + next)
+                // Three-token fusion: A + TO + Z → ATOZ
+                if (next.length < 3 && i + 2 < tokens.size) {
+                    val third = tokens[i + 2]
+                    if (!third.all { it.isDigit() }) {
+                        result.add(token + next + third)
+                    }
+                }
+            }
+        }
+        result.add(token)
+        i++
+    }
+    return result
 }
 
 // ---------------------------------------------------------------------------
@@ -286,9 +333,12 @@ object Matcher {
 
         Log.d("MATCHER", "========== MATCHING START ==========")
 
+        // Clean raw input first to remove branding, split colons, and fix common brand typos
+        val cleanedInput = NumericOcrCorrector.cleanOcrText(rawInput)
+
         // Correct OCR-confused strengths before the name-oriented char fixes;
         // otherwise valid dosage digits like 650 become GSO and lose number scoring.
-        val numericCorrectedInput = NumericOcrCorrector.correct(rawInput)
+        val numericCorrectedInput = NumericOcrCorrector.correct(cleanedInput)
         val charFixedInput = numericCorrectedInput.uppercase(Locale.ROOT)
             .map { CHAR_FIXES[it] ?: it }
             .joinToString("")
@@ -336,8 +386,7 @@ object Matcher {
                         .filter { it.medicine in allowed && it.medicine.name !in blacklist }
                     // If narrow search gives confident results, use them.
                     // Otherwise fall through to full DB.
-                    val testHits = narrowResults.take(500)
-                    if (testHits.size >= 5) testHits else precomputedDb
+                    if (narrowResults.size >= 5) narrowResults else precomputedDb
                 } else {
                     precomputedDb
                 }
@@ -388,7 +437,8 @@ object Matcher {
     }
 
     fun normalize(text: String): String {
-        val clean = NumericOcrCorrector.correct(text)
+        val cleaned = NumericOcrCorrector.cleanOcrText(text)
+        val clean = NumericOcrCorrector.correct(cleaned)
             .replace(Regex("[^A-Za-z0-9 \\-]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -403,7 +453,8 @@ object Matcher {
     fun preprocessForMatch(rawInput: String): String = preprocessInput(rawInput)
 
     fun debugInput(raw: String): String {
-        val numericCorrected = NumericOcrCorrector.correct(raw)
+        val cleaned = NumericOcrCorrector.cleanOcrText(raw)
+        val numericCorrected = NumericOcrCorrector.correct(cleaned)
         val preprocessed = preprocessInput(numericCorrected)
         val numbers = extractNumbers(numericCorrected)
         return "NUMERIC='$numericCorrected' PREPROCESS='$preprocessed' NUMBERS=$numbers | DISPLAY='${normalize(raw)}'"
@@ -555,7 +606,10 @@ object Matcher {
         // 5. Brand prefix bonus
         for (token in inputTokens) {
             if (token in CATEGORY_TOKENS) continue
-            if (token.length >= 4 && precomp.medNameRaw.startsWith(token)) {
+            if (token.length >= 4 &&
+                (precomp.medNameRaw.startsWith(token) ||
+                 precomp.medNameRaw.replace("-", "").startsWith(token) ||
+                 precomp.medNameRaw.replace(Regex("[\\s\\-]"), "").startsWith(token))) {
                 score += 15.0
                 reasons.add("BRAND_PREFIX($token)")
                 break
@@ -613,11 +667,28 @@ object Matcher {
     // HELPERS
     // =======================================================================
 
-    private fun extractBrandKey(medNameRaw: String): String =
-        medNameRaw.split(Regex("\\s+"))
-            .firstOrNull { it.length >= 4 && it.all { c -> c.isLetter() } }
-            ?.uppercase(Locale.ROOT)
-            ?: medNameRaw.replace(Regex("[^A-Z]"), "").take(8)
+    internal fun extractBrandKey(medNameRaw: String): String {
+        val parts = medNameRaw.split(Regex("[\\s\\-/]+")).filter { it.isNotEmpty() }
+        if (parts.isNotEmpty()) {
+            val first = parts[0].uppercase(Locale.ROOT)
+            if (first.length < 3 && parts.size > 1) {
+                val second = parts[1].uppercase(Locale.ROOT)
+                if (second.all { it.isLetter() }) {
+                    val fused = first + second
+                    if (fused.length >= 4 && fused.all { it.isLetter() }) {
+                        return fused
+                    }
+                }
+            }
+            parts.forEach { part ->
+                val upper = part.uppercase(Locale.ROOT)
+                if (upper.length >= 4 && upper.all { it.isLetter() }) {
+                    return upper
+                }
+            }
+        }
+        return medNameRaw.replace(Regex("[^A-Z]"), "").take(8)
+    }
 
     private fun lengthBoost(token: String): Double = when {
         token.length >= 10 -> 18.0
@@ -627,22 +698,41 @@ object Matcher {
         else               -> 2.0
     }
 
-    // FIX 1: preprocessInput now applies CHAR_FIXES early so all downstream
-    // processing (tokenize, extractNumbers called from findTopMatches) sees
-    // corrected characters. The caller also separately calls extractNumbers
-    // on the char-fixed string for accurate number matching (FIX 2).
     private fun preprocessInput(rawInput: String): String {
-        return rawInput
-            .uppercase(Locale.ROOT)
-            .map { CHAR_FIXES[it] ?: it }   // FIX 1: applied at start
-            .joinToString("")
-            .split(Regex("\\s+"))
-            .flatMap { token -> token.split("-") }
-            .flatMap { token ->
+        // Step 1: Clean branding and colon-between-brand-strength
+        val cleaned = NumericOcrCorrector.cleanOcrText(rawInput)
+
+        // Step 2: Split letter-digit and digit-letter boundaries
+        val text = cleaned.uppercase(Locale.ROOT)
+            .replace(Regex("""([A-Z])(\d)"""), "$1 $2")
+            .replace(Regex("""(\d)([A-Z])"""), "$1 $2")
+
+        // Step 3: Split on spaces, handle hyphens with fusion, apply fixes
+        val spaceSplit = text.split(Regex("\\s+"))
+
+        // For each space-token, split on hyphens and also yield the no-hyphen concat
+        val splitHyphens = spaceSplit.flatMap { token ->
+            if (token.contains("-")) {
+                val parts    = token.split("-").filter { it.isNotEmpty() }
+                val noHyphen = token.replace("-", "")
+                if (noHyphen.isNotEmpty()) parts + noHyphen else parts
+            } else {
+                listOf(token)
+            }
+        }
+
+        // Fuse short prefix tokens BEFORE the length filter
+        val fused = fuseShortTokens(splitHyphens)
+
+        val tokens = fused
+            .map { token ->
                 val clean = token.replace(Regex("[^A-Z0-9]"), "")
-                val corrected = OCR_WORD_CORRECTIONS[clean] ?: clean
-                Regex("(?<=[A-Z])(?=[0-9])|(?<=[0-9])(?=[A-Z])").split(corrected)
-                    .filter { it.isNotEmpty() }
+                val charFixed = if (clean.all { it.isDigit() } || clean.isEmpty()) {
+                    clean
+                } else {
+                    clean.map { CHAR_FIXES[it] ?: it }.joinToString("")
+                }
+                OCR_WORD_CORRECTIONS[charFixed] ?: charFixed
             }
             .filter { token ->
                 token.length >= 3 &&
@@ -650,7 +740,8 @@ object Matcher {
                         token !in STOPWORDS &&
                         !isGibberish(token)
             }
-            .joinToString(" ")
+
+        return tokens.distinct().joinToString(" ")
     }
 
     private fun extractNumbers(text: String): Set<String> =
@@ -661,14 +752,37 @@ object Matcher {
         return levenshtein(input, medicine) == 1
     }
 
-    private fun tokenize(text: String): List<String> =
-        text.uppercase(Locale.ROOT).split(" ")
+    internal fun tokenize(text: String): List<String> {
+        val rawUpper = text.uppercase(Locale.ROOT)
+
+        // Split on spaces/slashes first (keep hyphens temporarily)
+        val spaceSplit = rawUpper
+            .replace(Regex("[^A-Z0-9 \\-]"), "")
+            .split(Regex("[\\s/]+"))
+            .filter { it.isNotEmpty() }
+
+        // For hyphenated tokens: keep parts AND no-hyphen concat
+        val splitHyphens = spaceSplit.flatMap { token ->
+            if (token.contains("-")) {
+                val parts    = token.split("-").filter { it.isNotEmpty() }
+                val noHyphen = token.replace("-", "")
+                if (noHyphen.isNotEmpty()) parts + noHyphen else parts
+            } else {
+                listOf(token)
+            }
+        }
+
+        // Fuse short prefix tokens before length filter
+        val fused = fuseShortTokens(splitHyphens)
+
+        return fused
             .map { it.trim().trimStart(')', '(', '-', '.', ',', '*', '}', '{') }
             .filter { token ->
                 token.length >= 3 &&
                         token !in STOPWORDS &&
                         !token.all { it.isDigit() }
             }
+    }
 
     // FIX 5: extractDosageSuffixes now operates on the raw (char-fixed) text
     // string, not on tokens after stopword stripping.
