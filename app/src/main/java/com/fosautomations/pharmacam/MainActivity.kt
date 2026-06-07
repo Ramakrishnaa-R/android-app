@@ -356,31 +356,24 @@ class MainActivity : AppCompatActivity() {
                         val cropW = (rightBmp - leftBmp).coerceAtLeast(1)
                         val cropH = (bottomBmp - topBmp).coerceAtLeast(1)
 
-                        val squareCrop = Bitmap.createBitmap(bitmap, leftBmp, topBmp, cropW, cropH)
-                        val wideCrop = LabelOcrHelper.cropCenterWide3x1(squareCrop)
+                        val projectionCrop = Bitmap.createBitmap(bitmap, leftBmp, topBmp, cropW, cropH)
+                        val crop3x2 = LabelOcrHelper.cropCenter3x2(projectionCrop)
                         bitmap.recycle()
 
-                        val squareForDebug = squareCrop.copy(Bitmap.Config.ARGB_8888, false)
-                        val wideForDebug = wideCrop.copy(Bitmap.Config.ARGB_8888, false)
-                        BitmapHolder.bitmap = squareForDebug
-                        BitmapHolder.wideBitmap = wideForDebug
+                        val crop3x2ForDebug = crop3x2.copy(Bitmap.Config.ARGB_8888, false)
+                        BitmapHolder.bitmap = crop3x2ForDebug
+                        BitmapHolder.wideBitmap = null
                         Log.d(
                             TAG,
-                            "OCR projection crops: 1x1=${squareCrop.width}x${squareCrop.height} " +
-                                "3x1=${wideCrop.width}x${wideCrop.height}"
+                            "OCR projection crop 3x2: ${crop3x2.width}x${crop3x2.height}"
                         )
 
                         if (ScanDebugImageSaver.ENABLED) {
                             matchingScope.launch(Dispatchers.IO) {
                                 ScanDebugImageSaver.saveCapture(
                                     this@MainActivity,
-                                    squareForDebug,
-                                    "crop_1x1"
-                                )?.let { debugSaves.add(it) }
-                                ScanDebugImageSaver.saveCapture(
-                                    this@MainActivity,
-                                    wideForDebug,
-                                    "crop_3x1"
+                                    crop3x2ForDebug,
+                                    "crop_3x2"
                                 )?.let { debugSaves.add(it) }
                                 withContext(Dispatchers.Main) {
                                     if (debugSaves.isNotEmpty()) {
@@ -398,13 +391,12 @@ class MainActivity : AppCompatActivity() {
 
                         matchingScope.launch {
                             try {
-                                val consensus = processMultiFilterCrops(squareCrop, wideCrop)
+                                val consensus = processMultiFilterCrops(crop3x2)
 
-                                val bestSquare = consensus.bestSquareResult.ocrResult
-                                val bestWide = consensus.bestWideResult.ocrResult
+                                val ocrResult = consensus.ocrResult
 
-                                pendingWideOcrText = bestWide.fullText.ifBlank { bestWide.matchText }
-                                val primaryText = bestSquare.fullText.ifBlank { bestSquare.matchText }
+                                pendingWideOcrText = ocrResult.fullText.ifBlank { ocrResult.matchText }
+                                val primaryText = ocrResult.fullText.ifBlank { ocrResult.matchText }
                                 if (primaryText.length >= 3) {
                                     pendingOcrResult = primaryText
                                 }
@@ -525,19 +517,13 @@ class MainActivity : AppCompatActivity() {
                     binding.statusText.setTextColor("#FF9800".toColorInt())
                 }
 
-                val squareCrop = LabelOcrHelper.cropCenterSquare(fullBitmap)
-                val wideCrop = LabelOcrHelper.cropCenterWide3x1(fullBitmap)
+                val crop3x2 = LabelOcrHelper.cropCenter3x2(fullBitmap)
                 if (ScanDebugImageSaver.ENABLED) {
                     withContext(Dispatchers.IO) {
                         ScanDebugImageSaver.saveCapture(
                             this@MainActivity,
-                            squareCrop,
-                            "crop_1x1"
-                        )?.let { debugSaves.add(it) }
-                        ScanDebugImageSaver.saveCapture(
-                            this@MainActivity,
-                            wideCrop,
-                            "crop_3x1"
+                            crop3x2,
+                            "crop_3x2"
                         )?.let { debugSaves.add(it) }
                     }
                 }
@@ -545,18 +531,16 @@ class MainActivity : AppCompatActivity() {
 
                 Log.d(
                     TAG,
-                    "OCR crops: 1x1=${squareCrop.width}x${squareCrop.height} " +
-                        "3x1=${wideCrop.width}x${wideCrop.height}"
+                    "OCR crop 3x2: ${crop3x2.width}x${crop3x2.height}"
                 )
 
-                val consensus = processMultiFilterCrops(squareCrop, wideCrop)
+                val consensus = processMultiFilterCrops(crop3x2)
 
-                val bestSquare = consensus.bestSquareResult.ocrResult
-                val bestWide = consensus.bestWideResult.ocrResult
-                pendingWideOcrText = bestWide.fullText.ifBlank { bestWide.matchText }
+                val ocrResult = consensus.ocrResult
+                pendingWideOcrText = ocrResult.fullText.ifBlank { ocrResult.matchText }
                 val wideText = pendingWideOcrText.orEmpty()
 
-                BitmapHolder.winningFilter = consensus.bestSquareResult.filterName
+                BitmapHolder.winningFilter = consensus.filterName
 
                 withContext(Dispatchers.Main) {
                     binding.loader.visibility = View.GONE
@@ -566,7 +550,7 @@ class MainActivity : AppCompatActivity() {
 
                     if (fromShutter) finishCapture()
 
-                    val ocrForMatch = bestSquare.fullText.ifBlank { bestSquare.matchText }
+                    val ocrForMatch = ocrResult.fullText.ifBlank { ocrResult.matchText }
                     if (ocrForMatch.length >= 3) {
                         binding.resultTextView.text = getString(R.string.matching_medicine)
                         binding.resultTextView.setTextColor("#FF9800".toColorInt())
@@ -627,45 +611,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun processMultiFilterCrops(
-        squareCrop: Bitmap,
-        wideCrop: Bitmap
-    ): ConsensusResult = withContext(Dispatchers.Default) {
+        crop: Bitmap
+    ): SingleFilterConsensusResult = withContext(Dispatchers.Default) {
         // 180-second hard cap (3 minutes) — ensures we never timeout under normal usage.
         withTimeout(180_000L) {
             val progressCounter = java.util.concurrent.atomic.AtomicInteger(0)
             val updateProgress = suspend {
                 val completed = progressCounter.incrementAndGet()
                 withContext(Dispatchers.Main) {
-                    binding.statusText.text = "Reading label: running filter $completed/12…"
+                    binding.statusText.text = "Reading label: running filter $completed/6…"
                 }
             }
 
-            val squareDeferred = async { recognizeMultiFilter(squareCrop, isWide = false, updateProgress) }
-            val wideDeferred   = async { recognizeMultiFilter(wideCrop,   isWide = true,  updateProgress) }
-            val squareResults  = squareDeferred.await()
-            val wideResults    = wideDeferred.await()
+            val filterResults = recognizeMultiFilter(crop, updateProgress)
 
-            val ocrMap     = squareResults.associate { it.filterName to (it.ocrResult.fullText.ifBlank { it.ocrResult.matchText }) }
-            val wideOcrMap = wideResults.associate  { it.filterName to (it.ocrResult.fullText.ifBlank { it.ocrResult.matchText }) }
-            BitmapHolder.filterOcrTexts     = ocrMap
-            BitmapHolder.wideFilterOcrTexts = wideOcrMap
+            val ocrMap = filterResults.associate { it.filterName to (it.ocrResult.fullText.ifBlank { it.ocrResult.matchText }) }
+            BitmapHolder.filterOcrTexts = ocrMap
+            BitmapHolder.wideFilterOcrTexts = emptyMap()
 
-            computeConsensus(squareResults, wideResults)
+            computeConsensus(filterResults)
         }
     }
 
     private suspend fun recognizeMultiFilter(
         crop: Bitmap,
-        isWide: Boolean,
         onProgress: suspend () -> Unit
     ): List<FilterResult> = coroutineScope {
         val gray    = ImageUtils.toGrayscale(crop)
         val noGlare = ImageUtils.removeSpecularHighlights(gray)
 
-        if (!isWide) {
-            BitmapHolder.grayscaleBitmap = gray.copy(Bitmap.Config.ARGB_8888, false)
-            BitmapHolder.noGlareBitmap   = noGlare.copy(Bitmap.Config.ARGB_8888, false)
-        }
+        BitmapHolder.grayscaleBitmap = gray.copy(Bitmap.Config.ARGB_8888, false)
+        BitmapHolder.noGlareBitmap   = noGlare.copy(Bitmap.Config.ARGB_8888, false)
         gray.recycle()
 
         val upscaledBase = LabelOcrHelper.upscaleIfNeeded(noGlare)
@@ -679,7 +655,7 @@ class MainActivity : AppCompatActivity() {
                 val stdInput = upscaledBase.copy(Bitmap.Config.ARGB_8888, false)
                 val stdBmp   = LabelOcrHelper.prepareForOcr(stdInput)
                 val ocr = recognizePreparedSafe(stdBmp)
-                if (!isWide) BitmapHolder.enhancedBitmap = stdBmp.copy(Bitmap.Config.ARGB_8888, false)
+                BitmapHolder.enhancedBitmap = stdBmp.copy(Bitmap.Config.ARGB_8888, false)
                 stdBmp.recycle()
                 onProgress()
                 ocr
@@ -693,7 +669,7 @@ class MainActivity : AppCompatActivity() {
                 val binBmp   = LabelOcrHelper.preprocessBinarized(stdBmp)
                 stdBmp.recycle()
                 val ocr = recognizePreparedSafe(binBmp)
-                if (!isWide) BitmapHolder.binarizedBitmap = binBmp.copy(Bitmap.Config.ARGB_8888, false)
+                BitmapHolder.binarizedBitmap = binBmp.copy(Bitmap.Config.ARGB_8888, false)
                 binBmp.recycle()
                 onProgress()
                 ocr
@@ -704,7 +680,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.Default) {
                 val claheBmp = ImageUtils.applyClahe(upscaledBase)
                 val ocr = recognizePreparedSafe(claheBmp)
-                if (!isWide) BitmapHolder.claheBitmap = claheBmp.copy(Bitmap.Config.ARGB_8888, false)
+                BitmapHolder.claheBitmap = claheBmp.copy(Bitmap.Config.ARGB_8888, false)
                 claheBmp.recycle()
                 onProgress()
                 ocr
@@ -715,7 +691,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.Default) {
                 val gbBmp = ImageUtils.applyGamma(upscaledBase, 0.6f)
                 val ocr = recognizePreparedSafe(gbBmp)
-                if (!isWide) BitmapHolder.gammaBrightBitmap = gbBmp.copy(Bitmap.Config.ARGB_8888, false)
+                BitmapHolder.gammaBrightBitmap = gbBmp.copy(Bitmap.Config.ARGB_8888, false)
                 gbBmp.recycle()
                 onProgress()
                 ocr
@@ -726,7 +702,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.Default) {
                 val gdBmp = ImageUtils.applyGamma(upscaledBase, 1.6f)
                 val ocr = recognizePreparedSafe(gdBmp)
-                if (!isWide) BitmapHolder.gammaDarkBitmap = gdBmp.copy(Bitmap.Config.ARGB_8888, false)
+                BitmapHolder.gammaDarkBitmap = gdBmp.copy(Bitmap.Config.ARGB_8888, false)
                 gdBmp.recycle()
                 onProgress()
                 ocr
@@ -737,7 +713,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.Default) {
                 val sharpBmp = ImageUtils.applyStrongSharpen(upscaledBase)
                 val ocr = recognizePreparedSafe(sharpBmp)
-                if (!isWide) BitmapHolder.sharpenBitmap = sharpBmp.copy(Bitmap.Config.ARGB_8888, false)
+                BitmapHolder.sharpenBitmap = sharpBmp.copy(Bitmap.Config.ARGB_8888, false)
                 sharpBmp.recycle()
                 onProgress()
                 ocr
@@ -757,10 +733,11 @@ class MainActivity : AppCompatActivity() {
         val list = mutableListOf<FilterResult>()
         fun addResult(name: String, ocr: LabelOcrHelper.OcrResult) {
             val text = ocr.fullText.ifBlank { ocr.matchText }
-            val resolved = if (text.length >= 3) {
-                MedicineNameResolver.resolve(text, blacklist)
+            val correctedText = NumericOcrCorrector.correct(text)
+            val resolved = if (correctedText.length >= 3) {
+                MedicineNameResolver.resolve(correctedText, blacklist)
             } else null
-            list.add(FilterResult(name, isWide, ocr, resolved))
+            list.add(FilterResult(name, ocr, resolved))
         }
 
         addResult("standard",     standardOcr)
@@ -791,11 +768,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun computeConsensus(
-        squareResults: List<FilterResult>,
-        wideResults: List<FilterResult>
-    ): ConsensusResult {
-        val allResults = squareResults + wideResults
-        val validVotes = allResults.filter { it.resolved?.medicine != null && it.resolved.score >= 55.0 }
+        filterResults: List<FilterResult>
+    ): SingleFilterConsensusResult {
+        val validVotes = filterResults.filter { it.resolved?.medicine != null && it.resolved.score >= 55.0 }
 
         if (validVotes.isNotEmpty()) {
             val groups = validVotes.groupBy { it.resolved!!.medicine!!.id }
@@ -804,19 +779,8 @@ class MainActivity : AppCompatActivity() {
                 val totalScore = votes.sumOf { it.resolved!!.score }
                 val maxLineScore = votes.maxOf { it.ocrResult.lineScore }
 
-                val bestSquare = votes.filter { !it.isWide }.sortedWith(
-                    compareByDescending<FilterResult> { it.resolved!!.score }
-                        .thenByDescending { it.ocrResult.lineScore }
-                ).firstOrNull()
-
-                val bestWide = votes.filter { it.isWide }.sortedWith(
-                    compareByDescending<FilterResult> { it.resolved!!.score }
-                        .thenByDescending { it.ocrResult.lineScore }
-                ).firstOrNull()
-
                 val bestVote = votes.sortedWith(
-                    compareByDescending<FilterResult> { !it.isWide }
-                        .thenByDescending { it.resolved!!.score }
+                    compareByDescending<FilterResult> { it.resolved!!.score }
                         .thenByDescending { it.ocrResult.lineScore }
                 ).first()
 
@@ -825,8 +789,7 @@ class MainActivity : AppCompatActivity() {
                     frequency = frequency,
                     totalScore = totalScore,
                     maxLineScore = maxLineScore,
-                    bestSquare = bestSquare ?: bestVote,
-                    bestWide = bestWide ?: bestVote,
+                    bestResult = bestVote,
                     resolved = bestVote.resolved!!
                 )
             }.sortedWith(
@@ -836,17 +799,16 @@ class MainActivity : AppCompatActivity() {
             )
 
             val bestGroup = sortedGroups.first()
-            return ConsensusResult(
-                bestSquareResult = bestGroup.bestSquare,
-                bestWideResult = bestGroup.bestWide,
+            return SingleFilterConsensusResult(
+                filterName = bestGroup.bestResult.filterName,
+                ocrResult = bestGroup.bestResult.ocrResult,
                 resolved = bestGroup.resolved
             )
         } else {
-            val bestSquare = squareResults.maxByOrNull { it.ocrResult.lineScore } ?: squareResults.first()
-            val bestWide = wideResults.maxByOrNull { it.ocrResult.lineScore } ?: wideResults.first()
-            return ConsensusResult(
-                bestSquareResult = bestSquare,
-                bestWideResult = bestWide,
+            val bestResult = filterResults.maxByOrNull { it.ocrResult.lineScore } ?: filterResults.first()
+            return SingleFilterConsensusResult(
+                filterName = bestResult.filterName,
+                ocrResult = bestResult.ocrResult,
                 resolved = null
             )
         }
@@ -866,14 +828,13 @@ class MainActivity : AppCompatActivity() {
 
     private data class FilterResult(
         val filterName: String,
-        val isWide: Boolean,
         val ocrResult: LabelOcrHelper.OcrResult,
         val resolved: MedicineNameResolver.Resolved?
     )
 
-    private class ConsensusResult(
-        val bestSquareResult: FilterResult,
-        val bestWideResult: FilterResult,
+    private class SingleFilterConsensusResult(
+        val filterName: String,
+        val ocrResult: LabelOcrHelper.OcrResult,
         val resolved: MedicineNameResolver.Resolved?
     )
 
@@ -882,8 +843,7 @@ class MainActivity : AppCompatActivity() {
         val frequency: Int,
         val totalScore: Double,
         val maxLineScore: Int,
-        val bestSquare: FilterResult,
-        val bestWide: FilterResult,
+        val bestResult: FilterResult,
         val resolved: MedicineNameResolver.Resolved
     )
 
@@ -1234,9 +1194,11 @@ class MainActivity : AppCompatActivity() {
     private fun processScanResult(primaryOcr: String, hintOcr: String?) {
         if (primaryOcr.length < 3) return
         matchingScope.launch(Dispatchers.Default) {
-            val resolved = MedicineNameResolver.resolveForScan(primaryOcr, hintOcr, blacklist, 3)
+            val correctedPrimaryOcr = NumericOcrCorrector.correct(primaryOcr)
+            val correctedHintOcr = hintOcr?.let { NumericOcrCorrector.correct(it) }
+            val resolved = MedicineNameResolver.resolveForScan(correctedPrimaryOcr, correctedHintOcr, blacklist, 3)
             withContext(Dispatchers.Main) {
-                processScanResult(resolved, primaryOcr, hintOcr)
+                processScanResult(resolved, correctedPrimaryOcr, correctedHintOcr)
             }
         }
     }

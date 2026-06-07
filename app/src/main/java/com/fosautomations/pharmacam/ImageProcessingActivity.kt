@@ -203,7 +203,7 @@ class ImageProcessingActivity : AppCompatActivity() {
             squareOcr = stdText
         }
         if (wideOcr.length < 3) {
-            wideOcr = BitmapHolder.wideFilterOcrTexts?.get("standard").orEmpty()
+            wideOcr = BitmapHolder.filterOcrTexts?.get("standard").orEmpty()
         }
         resultPrimaryOcr = squareOcr
         resultWideOcr = wideOcr
@@ -270,23 +270,28 @@ class ImageProcessingActivity : AppCompatActivity() {
         }
 
     private fun showTextPipeline(container: LinearLayout, squareOcr: String, wideOcr: String) {
-        showTextStep(container, "📝 OCR used for match (1:1 / pickBest)", squareOcr.ifBlank { "(empty)" })
-        if (wideOcr.isNotBlank()) {
-            showTextStep(container, "📝 Wide crop hint (3:1)", wideOcr)
+        showTextStep(container, "📝 OCR used for match (3:2 crop / consensus)", squareOcr.ifBlank { "(empty)" })
+        if (wideOcr.isNotBlank() && wideOcr != squareOcr) {
+            showTextStep(container, "📝 Alternative consensus result", wideOcr)
         }
 
-        val charFixed = squareOcr.uppercase()
+        val numericCorrected = NumericOcrCorrector.correct(squareOcr)
+        if (numericCorrected != squareOcr) {
+            showTextStep(container, "🔢 Numeric OCR Corrected (G→6, S→5, O→0, etc.)", numericCorrected.ifBlank { "(empty)" })
+        }
+
+        val charFixed = numericCorrected.uppercase()
             .map { ch -> CHAR_FIXES[ch] ?: ch }
             .joinToString("")
         showTextStep(container, "🔤 Char Fixed (\$→S, 0→O, 2→Z …)", charFixed.ifBlank { "(empty)" })
 
-        val normalized = Matcher.normalize(squareOcr)
+        val normalized = Matcher.normalize(numericCorrected)
         showTextStep(container, "📋 Normalized (matcher)", normalized.ifBlank { "(empty)" })
 
-        val searchQuery = resolveDisplayQuery(squareOcr, wideOcr)
+        val searchQuery = resolveDisplayQuery(numericCorrected, wideOcr)
         showTextStep(container, "🔎 Search query (resolver)", searchQuery.ifBlank { "(empty)" })
 
-        val matcherDebug = Matcher.debugInput(searchQuery.ifBlank { squareOcr })
+        val matcherDebug = Matcher.debugInput(searchQuery.ifBlank { numericCorrected })
         showTextStep(container, "✅ Sent to Matcher", matcherDebug)
 
         scrollToBottom()
@@ -295,12 +300,14 @@ class ImageProcessingActivity : AppCompatActivity() {
     private fun resolveDisplayQuery(squareOcr: String, wideOcr: String): String {
         if (squareOcr.length < 3 && wideOcr.length < 3) return ""
         val primary = squareOcr.ifBlank { wideOcr }
+        val correctedPrimary = NumericOcrCorrector.correct(primary)
+        val correctedWide = NumericOcrCorrector.correct(wideOcr)
         val blacklist = intent.getStringArrayListExtra(EXTRA_BLACKLIST)?.toSet() ?: emptySet()
         return if (MedicineRepository.isReady()) {
-            MedicineNameResolver.resolveForScan(primary, wideOcr, blacklist, 5).searchQuery
+            MedicineNameResolver.resolveForScan(correctedPrimary, correctedWide, blacklist, 5).searchQuery
         } else {
-            MedicineNameResolver.buildSearchQuery(primary)
-                .ifBlank { MedicineNameResolver.buildSearchQuery(wideOcr) }
+            MedicineNameResolver.buildSearchQuery(correctedPrimary)
+                .ifBlank { MedicineNameResolver.buildSearchQuery(correctedWide) }
         }
     }
 
@@ -319,10 +326,12 @@ class ImageProcessingActivity : AppCompatActivity() {
         }
 
         val primary = squareOcr.ifBlank { wideOcr }
+        val correctedPrimary = NumericOcrCorrector.correct(primary)
+        val correctedWide = NumericOcrCorrector.correct(wideOcr)
         val blacklist = intent.getStringArrayListExtra(EXTRA_BLACKLIST)?.toSet() ?: emptySet()
-        val resolved = MedicineNameResolver.resolveForScan(primary, wideOcr, blacklist, 5)
+        val resolved = MedicineNameResolver.resolveForScan(correctedPrimary, correctedWide, blacklist, 5)
         val query = resolved.searchQuery.ifBlank {
-            MedicineNameResolver.buildSearchQuery(primary)
+            MedicineNameResolver.buildSearchQuery(correctedPrimary)
         }
 
         val body = buildString {

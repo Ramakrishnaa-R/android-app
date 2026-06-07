@@ -117,6 +117,34 @@ object LabelOcrHelper {
         return Bitmap.createBitmap(bitmap, left, top, cropW, cropH)
     }
 
+    /**
+     * Centered 3:2 aspect ratio crop.
+     * Single crop for multi-filter OCR pipeline (replaces 1:1 and 3:1 two-crop approach).
+     * Aspect ratio 3:2 provides a balanced view for package labels and medicine names.
+     */
+    fun cropCenter3x2(bitmap: Bitmap): Bitmap {
+        val maxH = bitmap.height
+        val maxW = bitmap.width
+        
+        // Calculate crop dimensions maintaining 3:2 aspect ratio
+        // Try to fit height first, then constrain width
+        var cropH = maxH
+        var cropW = (cropH * 3 / 2).toInt()
+        
+        // If width exceeds image width, fit width first
+        if (cropW > maxW) {
+            cropW = maxW
+            cropH = (cropW * 2 / 3).toInt()
+        }
+        
+        cropH = cropH.coerceAtLeast(1)
+        cropW = cropW.coerceAtLeast(1)
+        
+        val left = (maxW - cropW) / 2
+        val top = (maxH - cropH) / 2
+        return Bitmap.createBitmap(bitmap, left, top, cropW, cropH)
+    }
+
     /** Brand band on full capture (fractional crop — optional extra pass). */
     fun cropBrandRegion(bitmap: Bitmap): Bitmap =
         cropFraction(bitmap, CROP_LEFT_FRAC, CROP_TOP_FRAC, CROP_WIDTH_FRAC, CROP_HEIGHT_FRAC)

@@ -1,9 +1,12 @@
 package com.fosautomations.pharmacam
 
+import android.util.Log
 import java.math.BigDecimal
 import java.util.Locale
 
 object NumericOcrCorrector {
+
+    private const val TAG = "NumericOcrCorrector"
 
     fun cleanOcrText(raw: String): String {
         var text = raw.uppercase(Locale.ROOT)
@@ -37,8 +40,8 @@ object NumericOcrCorrector {
         return correctedTokens.joinToString(" ").replace(Regex("""\s{2,}"""), " ").trim()
     }
 
-
-    private val strengths = setOf(
+    /** Hardcoded valid medicine strengths whitelist (all common doses). */
+    private val VALID_STRENGTHS = setOf(
         "1", "2", "2.5", "3", "4", "5", "6", "8", "10",
         "12.5", "15", "20", "25", "30", "40", "50",
         "60", "75", "80", "90", "100", "110", "120",
@@ -47,16 +50,26 @@ object NumericOcrCorrector {
         "500", "550", "600", "625", "650", "667",
         "750", "800", "850", "1000", "1200",
         "1500", "2000", "3000"
-    ).map { normalizeNumber(it) }.toSet()
+    )
 
     private val units = setOf("MG", "MCG", "G", "GM", "KG", "ML", "L", "IU", "%")
     private val tokenRegex = Regex("""[A-Za-z0-9.]+%?|[^A-Za-z0-9.]+""")
     private val wordRegex = Regex("""^[A-Za-z0-9.]+%?$""")
 
+    /**
+     * Correct OCR numeric mistakes in medicine strengths.
+     * Converts: DOLO GSO → DOLO 650, AZEE SOO → AZEE 500, etc.
+     * 
+     * Pipeline flow:
+     * OCR Text → normalize → correct → validate → search query → matcher
+     */
     fun correct(text: String): String {
         if (text.isBlank()) return text
+        
+        Log.d(TAG, "Original OCR: $text")
+        
         val tokens = tokenRegex.findAll(text).map { it.value }.toList()
-        return buildString {
+        val result = buildString {
             tokens.forEachIndexed { index, token ->
                 append(
                     if (wordRegex.matches(token)) {
@@ -71,16 +84,54 @@ object NumericOcrCorrector {
                 )
             }
         }
+        
+        val corrected = result.replace(Regex("""\s{2,}"""), " ").trim()
+        
+        if (corrected != text) {
+            Log.d(TAG, "Final corrected OCR: $corrected")
+        }
+        
+        return corrected
     }
 
     private fun correctToken(token: String, previousWord: String?, nextWord: String?): String {
         val split = splitToken(token) ?: return token
         if (!looksLikeNumericOcr(split.numeric)) return token
 
-        val corrected = correctNumber(split.numeric) ?: return token
-        val hasUnitContext = split.unit.isNotEmpty() || isUnit(previousWord) || isUnit(nextWord)
-        if (!hasUnitContext && !isStandaloneStrengthCandidate(split.numeric, corrected)) return token
+        val candidate = buildString {
+            split.numeric.forEach { ch ->
+                append(
+                    when (ch) {
+                        'G' -> '6'
+                        'g' -> '9'
+                        'S', 's' -> '5'
+                        'O', 'o' -> '0'
+                        'I', 'l', 'L' -> '1'
+                        'B' -> '8'
+                        'Z' -> '2'
+                        else -> ch
+                    }
+                )
+            }
+        }
+        
+        if (!candidate.matches(Regex("""\d+(\.\d+)?"""))) return token
 
+        val corrected = normalizeNumber(candidate)
+        
+        // Validation: check if corrected value is in whitelist
+        if (corrected !in VALID_STRENGTHS) {
+            Log.d(TAG, "Numeric candidate '$corrected' NOT in whitelist (from '$token'), rejecting")
+            return token
+        }
+        
+        val hasUnitContext = split.unit.isNotEmpty() || isUnit(previousWord) || isUnit(nextWord)
+        if (!hasUnitContext && !isStandaloneStrengthCandidate(split.numeric, corrected)) {
+            Log.d(TAG, "No unit context for '$token', rejecting")
+            return token
+        }
+
+        Log.d(TAG, "Numeric correction: '$token' → '${split.numericPrefix}$corrected${split.unit}${split.suffix}' (valid)")
         return "${split.numericPrefix}$corrected${split.unit}${split.suffix}"
     }
 
@@ -111,29 +162,6 @@ object NumericOcrCorrector {
 
         if (core.isBlank()) return null
         return TokenParts(numericPrefix = "", numeric = core, unit = unit, suffix = suffix)
-    }
-
-    private fun correctNumber(value: String): String? {
-        val candidate = buildString {
-            value.forEach { ch ->
-                append(
-                    when (ch) {
-                        'G' -> '6'
-                        'g' -> '9'
-                        'S', 's' -> '5'
-                        'O', 'o' -> '0'
-                        'I', 'l', 'L' -> '1'
-                        'B' -> '8'
-                        'Z' -> '2'
-                        else -> ch
-                    }
-                )
-            }
-        }
-        if (!candidate.matches(Regex("""\d+(\.\d+)?"""))) return null
-
-        val normalized = normalizeNumber(candidate)
-        return if (normalized in strengths) normalized else null
     }
 
     private fun looksLikeNumericOcr(value: String): Boolean {
