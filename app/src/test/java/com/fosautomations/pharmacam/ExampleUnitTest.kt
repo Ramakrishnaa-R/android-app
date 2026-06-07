@@ -170,4 +170,25 @@ class ExampleUnitTest {
         assertEquals("T-BACT OINT 15 GM", resolved.medicine?.name)
         assertTrue("Resolved score is too low: ${resolved.score}", resolved.score >= 55.0)
     }
+
+    @Test
+    fun testGarnierAddressNitrobactResolution() {
+        MedicineRepository.loadForTest(listOf(
+            "NITROBACT 100 CAPS 10S",
+            "GARNIER ACNO FIGHT F/W 50ML"
+        ))
+        Matcher.buildIndex()
+        val input = "ss Garnier B 213 thdL AArea Mehatg nacha Predesh-17 NTROBACI100 t Nitrofurantoin Ca NTROBACT-100 Ench bardr ture"
+        
+        val query = MedicineNameResolver.buildSearchQuery(input)
+        println("buildSearchQuery result: $query")
+        
+        val resolved = MedicineNameResolver.resolve(input, emptySet())
+        println("Resolved medicine: ${resolved.medicine?.name} with query: ${resolved.searchQuery} score: ${resolved.score}")
+        
+        assertNotNull("Should resolve to a medicine", resolved.medicine)
+        assertEquals("NITROBACT 100 CAPS 10S", resolved.medicine?.name)
+        assertTrue("Score should be >= 55.0", resolved.score >= 55.0)
+    }
+
 }

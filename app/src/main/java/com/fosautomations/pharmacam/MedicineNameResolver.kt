@@ -29,7 +29,13 @@ object MedicineNameResolver {
         "INJECTION", "LIQUID", "DROP", "DROPS", "SPRAY", "INHALER", "POWDER", "DATE",
         "LICENSE", "LICENCE", "REGD", "REGISTERED", "PRESCRIPTION", "CONTAINS", "CONTAIN",
         "FORMULA", "INDIA", "LTD", "PVT", "LIMITED", "PHARMA", "PHARMACEUTICALS",
-        "LABORATORIES", "LABS", "INCORPORATED", "INC"
+        "LABORATORIES", "LABS", "INCORPORATED", "INC",
+        // Address, manufacturer and office noise words
+        "AREA", "INDUSTRIAL", "ROAD", "STREET", "PLOT", "PHASE", "SECTOR", "BUILDING", "BLDG",
+        "DIST", "DISTRICT", "PRADESH", "HIMACHAL", "PUNJAB", "HARYANA", "GUJARAT", "MAHARASHTRA",
+        "DELHI", "KARNATAKA", "TAMIL", "NADU", "BENGAL", "BIHAR", "UTTAR", "KERALA", "OFFICE",
+        "ADDRESS", "ADDR", "CUSTOMER", "CARE", "CONTACT", "PHONE", "TELEPHONE", "TEL", "EMAIL",
+        "COMPLAINTS", "FEEDBACK", "TOLL", "FREE"
     )
 
     private const val MIN_ACCEPT_SCORE = 55.0
@@ -241,6 +247,12 @@ object MedicineNameResolver {
         val list = mutableListOf<String>()
         if (primary.isNotBlank()) list.add(primary)
 
+        val spacedForPairs = correctedOcr.uppercase(Locale.ROOT)
+            .replace(Regex("[^A-Z0-9 \\-]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        extractAllBrandStrengthPairs(spacedForPairs).forEach { list.add(it) }
+
         val words = correctedOcr.uppercase(Locale.ROOT)
             .split(Regex("[^A-Z0-9]+"))
             .filter { it.isNotEmpty() }
@@ -278,7 +290,7 @@ object MedicineNameResolver {
         val tokens = spaced.split(" ")
             .map { it.trim() }
             .filter { isBrandToken(it) }
-            .take(8)
+            .take(15)
 
         tokens.forEach { list.add(it) }
 
@@ -321,14 +333,23 @@ object MedicineNameResolver {
     }
 
     fun extractBrandStrengthFromCompact(spaced: String, compact: String): String? {
+        return extractAllBrandStrengthPairs(spaced).firstOrNull()
+    }
+
+    fun extractAllBrandStrengthPairs(spaced: String): List<String> {
         val brandStrengthRegex = Regex(
             """\b([A-Z]{3,20})[\s\-]*((?:[2-9]00|1000|650|625|500|457|400|375|325|300|250|228|200|150|125|100|80|75|60|50|40|30|25|20|15|10|8|5|4|2))\b"""
         )
-        val match = brandStrengthRegex.find(spaced) ?: return null
-        val brand    = match.groupValues[1]
-        val strength = match.groupValues[2]
-        if (brand.length < 3 || brand in INGREDIENT_WORDS) return null
-        return "$brand $strength"
+        return brandStrengthRegex.findAll(spaced)
+            .map { match ->
+                val brand    = match.groupValues[1]
+                val strength = match.groupValues[2]
+                if (brand.length >= 3 && brand !in INGREDIENT_WORDS) {
+                    "$brand $strength"
+                } else null
+            }
+            .filterNotNull()
+            .toList()
     }
 
     private fun splitKnownFused(compact: String): String? {

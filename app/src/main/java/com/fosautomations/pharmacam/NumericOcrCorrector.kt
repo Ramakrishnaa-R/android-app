@@ -174,6 +174,7 @@ object NumericOcrCorrector {
 
     private fun isStandaloneStrengthCandidate(original: String, corrected: String): Boolean {
         if (original.length > 4) return false
+        if (original.length == 1 && original != corrected) return false
         return original != corrected || original.all { it.isDigit() }
     }
 
