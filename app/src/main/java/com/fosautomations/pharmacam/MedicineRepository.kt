@@ -21,10 +21,20 @@ object MedicineRepository {
         "DATE", "MRP", "EXTERNAL", "TREATMENT", "INFECTION", "THE"
     )
 
+    fun dbNormalize(text: String): String {
+        val upper = text.uppercase(Locale.ROOT)
+        return upper
+            .replace(Regex("""([A-Z])(\d)"""), "$1 $2")
+            .replace(Regex("""(\d)([A-Z])"""), "$1 $2")
+            .replace(Regex("[^A-Z0-9 \\-]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
     fun getDatabase(): List<Medicine> = synchronized(database) { database.toList() }
 
     fun getMedicineByName(name: String): Medicine? = synchronized(database) {
-        nameToMedicineMap[name.uppercase(Locale.ROOT).trim()]
+        nameToMedicineMap[dbNormalize(name)]
     }
 
     fun isReady(): Boolean = synchronized(database) { isLoaded && database.isNotEmpty() }
@@ -102,7 +112,7 @@ object MedicineRepository {
 
     private fun addInternalLocked(medicine: Medicine) {
         database.add(medicine)
-        nameToMedicineMap[medicine.name.uppercase(Locale.ROOT).trim()] = medicine
+        nameToMedicineMap[dbNormalize(medicine.name)] = medicine
         val category = ProductCategoryClassifier.classify(medicine.name, ClassificationSource.DATABASE)
         categoryIndex.getOrPut(category) { mutableListOf() }.add(medicine)
         tokenize(medicine.name).forEach { word ->
@@ -195,7 +205,7 @@ object MedicineRepository {
         categoryIndex.clear()
         nameToMedicineMap.clear()
         database.forEach { med ->
-            nameToMedicineMap[med.name.uppercase(Locale.ROOT).trim()] = med
+            nameToMedicineMap[dbNormalize(med.name)] = med
             val category = ProductCategoryClassifier.classify(med.name, ClassificationSource.DATABASE)
             categoryIndex.getOrPut(category) { mutableListOf() }.add(med)
             tokenize(med.name).forEach { word ->

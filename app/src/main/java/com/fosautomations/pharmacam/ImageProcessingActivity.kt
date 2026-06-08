@@ -154,11 +154,15 @@ class ImageProcessingActivity : AppCompatActivity() {
             val top = resolved.medicine
             if (top != null) {
                 append("Top Match: ${top.name}\n")
+                val topMatch = resolved.alternatives.firstOrNull()
+                if (topMatch != null) {
+                    val isHashMap = topMatch.explanation == "EXACT_HASHMAP_MATCH"
+                    append("Match Method: ${if (isHashMap) "⚡ HashMap Exact Match" else "🔍 Fuzzy Match"}\n")
+                }
                 append("Score: ${resolved.score.toInt()}%\n")
                 append("Query Used: ${resolved.searchQuery}\n")
                 
-                val topMatch = resolved.alternatives.firstOrNull()
-                if (topMatch != null && topMatch.explanation.isNotBlank()) {
+                if (topMatch != null && topMatch.explanation.isNotBlank() && topMatch.explanation != "EXACT_HASHMAP_MATCH") {
                     append("Score Breakdown: ${topMatch.explanation}\n")
                 }
                 
@@ -175,8 +179,9 @@ class ImageProcessingActivity : AppCompatActivity() {
             if (alternates.isNotEmpty()) {
                 append("\n\nOther Candidates Checked:")
                 alternates.forEachIndexed { i, m ->
-                    append("\n  ${i + 2}. ${m.medicine.name} (${m.score.toInt()}%)")
-                    if (m.explanation.isNotBlank()) {
+                    val isHashMap = m.explanation == "EXACT_HASHMAP_MATCH"
+                    append("\n  ${i + 2}. ${m.medicine.name} (${m.score.toInt()}%) - ${if (isHashMap) "HashMap Exact" else "Fuzzy"}")
+                    if (m.explanation.isNotBlank() && !isHashMap) {
                         append("\n     Breakdown: ${m.explanation}")
                     }
                 }

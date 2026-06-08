@@ -391,13 +391,29 @@ class MainActivity : AppCompatActivity() {
                         pendingOcrResult = null
 
                         matchingScope.launch {
+                            var statusJob: kotlinx.coroutines.Job? = null
                             try {
-                                withContext(Dispatchers.Main) {
-                                    binding.statusText.text = "Analyzing image with Gemma 3n on-device AI…"
-                                    binding.statusText.setTextColor("#FF9800".toColorInt())
+                                statusJob = launch {
+                                    val messages = listOf(
+                                        "Analyzing image with Gemma 3n on-device AI…",
+                                        "Gemma 3n: Initializing multimodal session…",
+                                        "Gemma 3n: Converting image & processing vision tokens…",
+                                        "Gemma 3n: Running on-device neural engine inference…",
+                                        "Gemma 3n: Generating brand & strength tokens…",
+                                        "Gemma 3n: Finalizing detected text sequence…",
+                                        "Matcher: Initializing database lookup…"
+                                    )
+                                    var index = 0
+                                    while (isActive) {
+                                        binding.statusText.text = messages[index]
+                                        binding.statusText.setTextColor("#FF9800".toColorInt())
+                                        index = (index + 1) % messages.size
+                                        delay(8000)
+                                    }
                                 }
 
                                 val medicineName = visionFinder?.extractMedicineName(projectionCrop)
+                                statusJob?.cancel()
 
                                 withContext(Dispatchers.Main) {
                                     finishCapture()
@@ -423,6 +439,7 @@ class MainActivity : AppCompatActivity() {
                                     )
                                 }
                             } catch (e: Exception) {
+                                statusJob?.cancel()
                                 Log.e("Gemma", "Gemma inference failed", e)
                                 withContext(Dispatchers.Main) {
                                     finishCapture()
@@ -1073,7 +1090,13 @@ class MainActivity : AppCompatActivity() {
 
         val normalized = Matcher.normalize(primaryOcr)
         val searchQuery = resolved.searchQuery
-        lastNormalizationStatus = normalizationStatusLine(normalized, searchQuery)
+        val topMatch = resolved.alternatives.firstOrNull()
+        val matchType = if (topMatch != null) {
+            if (topMatch.explanation == "EXACT_HASHMAP_MATCH") "⚡ HashMap Exact" else "🔍 Fuzzy"
+        } else {
+            "No Match"
+        }
+        lastNormalizationStatus = normalizationStatusLine(normalized, searchQuery, "Match: $matchType")
 
         runOnUiThread {
             binding.statusText.text = lastNormalizationStatus
