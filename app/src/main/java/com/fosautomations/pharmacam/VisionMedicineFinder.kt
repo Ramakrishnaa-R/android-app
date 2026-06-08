@@ -67,6 +67,9 @@ class VisionMedicineFinder(private val context: Context) : AutoCloseable {
                         - T BACT OINTMENT
                         - RAZO 20
                         - AUGMENTIN 625
+                        
+                        If you cannot clearly read or identify any medicine brand and strength from the package, reply with ONLY the text "NOT FOUND".
+                        
                         Reply with ONLY the medicine name and strength.
                         Nothing else. No explanation.
                     """.trimIndent()

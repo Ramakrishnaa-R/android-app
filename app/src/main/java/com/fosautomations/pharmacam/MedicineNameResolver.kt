@@ -185,7 +185,8 @@ object MedicineNameResolver {
         var bestTopScore = 0.0
 
         for (query in queries) {
-            if (query.length < 3) continue
+            val trimmed = query.trim().uppercase(Locale.ROOT)
+            if (trimmed == "NOT FOUND" || trimmed == "NOT_FOUND" || trimmed == "NONE" || trimmed == "UNKNOWN" || query.length < 3) continue
             val matches = Matcher.findTopMatches(query, blacklist, maxResults)
             val topScore = matches.firstOrNull()?.score ?: 0.0
             if (topScore > bestTopScore) {

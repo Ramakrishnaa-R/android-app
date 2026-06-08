@@ -331,6 +331,12 @@ object Matcher {
 
         if (precomputedDb.isEmpty()) buildIndex()
 
+        val trimmedInput = rawInput.trim().uppercase(Locale.ROOT)
+        if (trimmedInput == "NOT FOUND" || trimmedInput == "NOT_FOUND" || trimmedInput == "NONE" || trimmedInput == "UNKNOWN" || trimmedInput.isBlank()) {
+            Log.d("MATCHER", "Skipping matching for generic input: $trimmedInput")
+            return emptyList()
+        }
+
         Log.d("MATCHER", "========== MATCHING START ==========")
 
         // 1. O(1) HashMap Exact Match check
