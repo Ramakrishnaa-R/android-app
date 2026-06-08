@@ -11,6 +11,7 @@ import java.util.*
 
 object MedicineRepository {
     private val database = mutableListOf<Medicine>()
+    private val nameToMedicineMap = HashMap<String, Medicine>()
     private val invertedIndex = mutableMapOf<String, MutableSet<Medicine>>()
     private val categoryIndex = mutableMapOf<ProductCategory, MutableList<Medicine>>()
     private var isLoaded = false
@@ -21,6 +22,10 @@ object MedicineRepository {
     )
 
     fun getDatabase(): List<Medicine> = synchronized(database) { database.toList() }
+
+    fun getMedicineByName(name: String): Medicine? = synchronized(database) {
+        nameToMedicineMap[name.uppercase(Locale.ROOT).trim()]
+    }
 
     fun isReady(): Boolean = synchronized(database) { isLoaded && database.isNotEmpty() }
 
@@ -97,6 +102,7 @@ object MedicineRepository {
 
     private fun addInternalLocked(medicine: Medicine) {
         database.add(medicine)
+        nameToMedicineMap[medicine.name.uppercase(Locale.ROOT).trim()] = medicine
         val category = ProductCategoryClassifier.classify(medicine.name, ClassificationSource.DATABASE)
         categoryIndex.getOrPut(category) { mutableListOf() }.add(medicine)
         tokenize(medicine.name).forEach { word ->
@@ -187,7 +193,9 @@ object MedicineRepository {
     private fun rebuildIndexLocked() {
         invertedIndex.clear()
         categoryIndex.clear()
+        nameToMedicineMap.clear()
         database.forEach { med ->
+            nameToMedicineMap[med.name.uppercase(Locale.ROOT).trim()] = med
             val category = ProductCategoryClassifier.classify(med.name, ClassificationSource.DATABASE)
             categoryIndex.getOrPut(category) { mutableListOf() }.add(med)
             tokenize(med.name).forEach { word ->

@@ -333,6 +333,14 @@ object Matcher {
 
         Log.d("MATCHER", "========== MATCHING START ==========")
 
+        // 1. O(1) HashMap Exact Match check
+        val exactQuery = normalize(rawInput)
+        val exactMed = MedicineRepository.getMedicineByName(exactQuery)
+        if (exactMed != null && exactMed.name !in blacklist) {
+            Log.d("MATCHER", "O(1) HashMap Exact Match Found: ${exactMed.name}")
+            return listOf(ScoredMatch(exactMed, 100.0, "EXACT_HASHMAP_MATCH"))
+        }
+
         // Clean raw input first to remove branding, split colons, and fix common brand typos
         val cleanedInput = NumericOcrCorrector.cleanOcrText(rawInput)
 
