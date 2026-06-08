@@ -358,10 +358,8 @@ class MainActivity : AppCompatActivity() {
 
                         val projectionCrop = Bitmap.createBitmap(bitmap, leftBmp, topBmp, cropW, cropH)
                         // projectionCrop IS the scan zone — no second crop needed.
-                        bitmap.recycle()
-
-                        val crop3x2ForDebug = projectionCrop.copy(Bitmap.Config.ARGB_8888, false)
-                        BitmapHolder.bitmap = crop3x2ForDebug
+                        val crop3x1ForDebug = projectionCrop.copy(Bitmap.Config.ARGB_8888, false)
+                        BitmapHolder.bitmap = crop3x1ForDebug
                         BitmapHolder.wideBitmap = null
                         Log.d(
                             TAG,
@@ -372,8 +370,8 @@ class MainActivity : AppCompatActivity() {
                             matchingScope.launch(Dispatchers.IO) {
                                 ScanDebugImageSaver.saveCapture(
                                     this@MainActivity,
-                                    crop3x2ForDebug,
-                                    "crop_3x2"
+                                    crop3x1ForDebug,
+                                    "crop_3x1"
                                 )?.let { debugSaves.add(it) }
                                 withContext(Dispatchers.Main) {
                                     if (debugSaves.isNotEmpty()) {
@@ -386,11 +384,17 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
 
+                        bitmap.recycle()
+
                         pendingWideOcrText = null
                         pendingOcrResult = null
 
                         matchingScope.launch {
                             try {
+                                withContext(Dispatchers.Main) {
+                                    binding.statusText.text = "Cropping scan box…"
+                                    binding.statusText.setTextColor("#FF9800".toColorInt())
+                                }
                                 val consensus = processMultiFilterCrops(projectionCrop)
 
                                 val ocrResult = consensus.ocrResult
@@ -473,7 +477,7 @@ class MainActivity : AppCompatActivity() {
     private fun finishCapture() {
         isCapturing = false
         binding.btnShutter.isEnabled = true
-        binding.scanBox.setBackgroundColor(Color.TRANSPARENT)
+        binding.scanBox.setBackgroundResource(R.drawable.scan_box_border)
     }
 
     private fun clearActiveMatchUiForNewScan() {
@@ -513,17 +517,17 @@ class MainActivity : AppCompatActivity() {
             try {
                 withContext(Dispatchers.Main) {
                     binding.loader.visibility = View.VISIBLE
-                    binding.statusText.text = "Reading label…"
+                    binding.statusText.text = "Cropping center wide zone…"
                     binding.statusText.setTextColor("#FF9800".toColorInt())
                 }
 
-                val crop3x2 = LabelOcrHelper.cropCenter3x2(fullBitmap)
+                val crop3x1 = LabelOcrHelper.cropCenterWide3x1(fullBitmap)
                 if (ScanDebugImageSaver.ENABLED) {
                     withContext(Dispatchers.IO) {
                         ScanDebugImageSaver.saveCapture(
                             this@MainActivity,
-                            crop3x2,
-                            "crop_3x2"
+                            crop3x1,
+                            "crop_3x1"
                         )?.let { debugSaves.add(it) }
                     }
                 }
@@ -531,10 +535,10 @@ class MainActivity : AppCompatActivity() {
 
                 Log.d(
                     TAG,
-                    "OCR crop 3x2: ${crop3x2.width}x${crop3x2.height}"
+                    "OCR crop 3x1: ${crop3x1.width}x${crop3x1.height}"
                 )
 
-                val consensus = processMultiFilterCrops(crop3x2)
+                val consensus = processMultiFilterCrops(crop3x1)
 
                 val ocrResult = consensus.ocrResult
                 pendingWideOcrText = ocrResult.fullText.ifBlank { ocrResult.matchText }
@@ -616,7 +620,7 @@ class MainActivity : AppCompatActivity() {
         // 180-second hard cap (3 minutes) — ensures we never timeout under normal usage.
         withTimeout(180_000L) {
             withContext(Dispatchers.Main) {
-                binding.statusText.text = "Reading label…"
+                binding.statusText.text = "Running OCR pipeline…"
             }
 
             val filterResult = recognizeSingleFilter(crop)
@@ -646,6 +650,9 @@ class MainActivity : AppCompatActivity() {
     private suspend fun recognizeSingleFilter(
         crop: Bitmap
     ): FilterResult = withContext(Dispatchers.Default) {
+        withContext(Dispatchers.Main) {
+            binding.statusText.text = "Enhancing image contrast…"
+        }
         // Apply filter on the ORIGINAL colour crop so hue info is preserved
         val colourUpscaled = LabelOcrHelper.upscaleIfNeeded(crop.copy(Bitmap.Config.ARGB_8888, false))
         val filtered = ImageUtils.applyBlackPointSaturation(colourUpscaled, blackPoint = 70, saturation = 0.75f)
@@ -653,12 +660,18 @@ class MainActivity : AppCompatActivity() {
 
         BitmapHolder.filteredBitmap = filtered.copy(Bitmap.Config.ARGB_8888, false)
 
-
+        withContext(Dispatchers.Main) {
+            binding.statusText.text = "ML Kit OCR text recognition…"
+        }
         val ocr = recognizePreparedSafe(filtered)
         filtered.recycle()
 
         val text = ocr.fullText.ifBlank { ocr.matchText }
         val correctedText = NumericOcrCorrector.correct(text)
+        
+        withContext(Dispatchers.Main) {
+            binding.statusText.text = "Resolving name in database…"
+        }
         val resolved = if (correctedText.length >= 3) {
             MedicineNameResolver.resolve(correctedText, blacklist)
         } else null
@@ -1424,7 +1437,7 @@ class MainActivity : AppCompatActivity() {
             binding.resultTextView.setTextColor("#E0E0E0".toColorInt())
             binding.loader.visibility = View.GONE
             binding.top3Container.visibility = View.GONE
-            binding.scanBox.setBackgroundColor(Color.TRANSPARENT)
+            binding.scanBox.setBackgroundResource(R.drawable.scan_box_border)
             binding.btnShutter.isEnabled = true
             if (confirmedMedicines.isEmpty()) binding.confirmBtn.isEnabled = false
         }
@@ -1656,7 +1669,7 @@ class MainActivity : AppCompatActivity() {
             val buf    = planes[0].buffer
             val stride = planes[0].rowStride
             val w = width; val h = height
-            val roi = LabelOcrHelper.centerSquareRoi(w, h)
+            val roi = LabelOcrHelper.centerWide3x1Roi(w, h)
             val x0 = roi[0]; val y0 = roi[1]; val x1 = roi[2]; val y1 = roi[3]
             var bright = 0; var total = 0
             var row = y0
@@ -1678,7 +1691,7 @@ class MainActivity : AppCompatActivity() {
             val buf    = planes[0].buffer
             val stride = planes[0].rowStride
             val w = width; val h = height
-            val roi = LabelOcrHelper.centerSquareRoi(w, h)
+            val roi = LabelOcrHelper.centerWide3x1Roi(w, h)
             val x0 = (roi[0] + 1).coerceAtMost(roi[2] - 1)
             val y0 = (roi[1] + 1).coerceAtMost(roi[3] - 1)
             val x1 = roi[2]; val y1 = roi[3]
@@ -1706,7 +1719,7 @@ class MainActivity : AppCompatActivity() {
             val stride = planes[0].rowStride
             val w = width
             val h = height
-            val roi = LabelOcrHelper.centerSquareRoi(w, h)
+            val roi = LabelOcrHelper.centerWide3x1Roi(w, h)
             val x0 = (roi[0] + 1).coerceAtMost(roi[2] - 1)
             val y0 = (roi[1] + 1).coerceAtMost(roi[3] - 1)
             val x1 = roi[2]

@@ -81,14 +81,14 @@
 
         <View
             android:id="@+id/scanBox"
-            android:layout_width="260dp"
-            android:layout_height="260dp"
+            android:layout_width="300dp"
+            android:layout_height="100dp"
             android:layout_gravity="center"
             android:background="@drawable/scan_box_border" />
 
         <View
             android:id="@+id/scanLine"
-            android:layout_width="260dp"
+            android:layout_width="300dp"
             android:layout_height="2dp"
             android:layout_gravity="center_horizontal"
             android:background="#4CAF50"

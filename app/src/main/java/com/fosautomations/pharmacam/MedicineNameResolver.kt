@@ -240,7 +240,7 @@ object MedicineNameResolver {
         return filtered
     }
 
-    private fun buildSearchQueries(ocrText: String): List<String> {
+    fun buildSearchQueries(ocrText: String): List<String> {
         val cleaned = NumericOcrCorrector.cleanOcrText(ocrText)
         val correctedOcr = NumericOcrCorrector.correct(cleaned)
         val primary = buildSearchQuery(correctedOcr)

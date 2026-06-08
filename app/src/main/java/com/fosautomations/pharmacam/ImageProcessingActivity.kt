@@ -68,25 +68,11 @@ class ImageProcessingActivity : AppCompatActivity() {
     private suspend fun runPipeline(original: Bitmap) {
         val container = findViewById<LinearLayout>(R.id.stepsContainer)
 
-        // 1. Original capture (scan zone)
-        showStep(container, "📷 Original Capture (scan zone)", original.copy(Bitmap.Config.ARGB_8888, false))
+        // 1. 1:3 Crop (scan zone)
+        showStep(container, "📷 1:3 Crop (scan zone)", original.copy(Bitmap.Config.ARGB_8888, false))
         delay(200)
 
-        // 2. BP70 + Sat75 filter (what OCR actually sees)
-        val filteredSnap = BitmapHolder.filteredBitmap
-        val filtered = if (filteredSnap != null && !filteredSnap.isRecycled) {
-            filteredSnap.copy(Bitmap.Config.ARGB_8888, false)
-        } else {
-            val colourSrc = original.copy(Bitmap.Config.ARGB_8888, false)
-            val up = withContext(Dispatchers.Default) { LabelOcrHelper.upscaleIfNeeded(colourSrc) }
-            val ret = withContext(Dispatchers.Default) {
-                ImageUtils.applyBlackPointSaturation(up, blackPoint = 70, saturation = 0.75f)
-            }
-            if (up !== colourSrc) colourSrc.recycle()
-            up.recycle()
-            ret
-        }
-        showStep(container, "🎯 BP70 + Sat75 Filter (sent to OCR)", filtered)
+        // 2. OCR Text from Filter
         val filterText = BitmapHolder.filterOcrTexts?.get("bp-sat") ?: ""
         showTextStep(container, "📝 OCR Text from Filter", filterText.ifBlank { "(no text)" })
         delay(200)
@@ -127,7 +113,6 @@ class ImageProcessingActivity : AppCompatActivity() {
     // ── Text pipeline steps ───────────────────────────────────────────────────
 
     private fun showTextPipeline(container: LinearLayout, squareOcr: String, wideOcr: String) {
-        showTextStep(container, "📝 OCR used for match (BP70+Sat75)", squareOcr.ifBlank { "(empty)" })
         if (wideOcr.isNotBlank() && wideOcr != squareOcr) {
             showTextStep(container, "📝 Alternative OCR result", wideOcr)
         }
@@ -135,9 +120,6 @@ class ImageProcessingActivity : AppCompatActivity() {
         if (numericCorrected != squareOcr) {
             showTextStep(container, "🔢 Numeric Corrected (G→6, S→5, O→0…)", numericCorrected.ifBlank { "(empty)" })
         }
-        val charFixed = numericCorrected.uppercase()
-            .map { ch -> CHAR_FIXES[ch] ?: ch }.joinToString("")
-        showTextStep(container, "🔤 Char Fixed (\$→S, 0→O, 2→Z…)", charFixed.ifBlank { "(empty)" })
         val normalized = Matcher.normalize(numericCorrected)
         showTextStep(container, "📋 Normalized (matcher)", normalized.ifBlank { "(empty)" })
         val searchQuery = resolveDisplayQuery(numericCorrected, wideOcr)
@@ -173,24 +155,44 @@ class ImageProcessingActivity : AppCompatActivity() {
         val correctedWide    = NumericOcrCorrector.correct(wideOcr)
         val blacklist        = intent.getStringArrayListExtra(EXTRA_BLACKLIST)?.toSet() ?: emptySet()
         val resolved         = MedicineNameResolver.resolveForScan(correctedPrimary, correctedWide, blacklist, 5)
-        val query            = resolved.searchQuery.ifBlank { MedicineNameResolver.buildSearchQuery(correctedPrimary) }
+
+        // Extract and display all candidate queries that the resolver evaluated
+        val queries = (MedicineNameResolver.buildSearchQueries(correctedPrimary) +
+                       (correctedWide.takeIf { it.isNotBlank() }?.let { MedicineNameResolver.buildSearchQueries(it) } ?: emptyList()))
+                      .distinct()
+        
+        showTextStep(container, "🔎 Candidate Queries Evaluated", queries.joinToString(", "))
 
         val body = buildString {
             val top = resolved.medicine
             if (top != null) {
-                append(top.name)
-                append("\n\nScore: ${resolved.score.toInt()}%")
-                append("\nQuery: $query")
+                append("Top Match: ${top.name}\n")
+                append("Score: ${resolved.score.toInt()}%\n")
+                append("Query Used: ${resolved.searchQuery}\n")
+                
+                val topMatch = resolved.alternatives.firstOrNull()
+                if (topMatch != null && topMatch.explanation.isNotBlank()) {
+                    append("Score Breakdown: ${topMatch.explanation}\n")
+                }
+                
                 append(if (MedicineNameResolver.shouldAutoPick(resolved))
-                    "\n\nWill auto-select when you tap Close"
+                    "\nStatus: Auto-select confirmed (gap is wide enough)"
                 else
-                    "\n\nTap Close — pick from suggestions if needed")
+                    "\nStatus: Tap Close — pick from suggestions if needed")
             } else {
-                append("No match in your medicine list")
-                append("\n\nQuery tried: $query")
+                append("No match in your medicine list\n")
+                append("Queries Tried: ${queries.joinToString(", ")}")
             }
-            resolved.alternatives.drop(1).take(3).forEachIndexed { i, m ->
-                append("\n  ${i + 2}. ${m.medicine.name} (${m.score.toInt()}%)")
+
+            val alternates = resolved.alternatives.drop(1).take(3)
+            if (alternates.isNotEmpty()) {
+                append("\n\nOther Candidates Checked:")
+                alternates.forEachIndexed { i, m ->
+                    append("\n  ${i + 2}. ${m.medicine.name} (${m.score.toInt()}%)")
+                    if (m.explanation.isNotBlank()) {
+                        append("\n     Breakdown: ${m.explanation}")
+                    }
+                }
             }
         }
         showHighlightStep(container, "💊 Match (medicines.json)", body.trim())

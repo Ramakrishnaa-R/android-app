@@ -161,6 +161,15 @@ object LabelOcrHelper {
         return intArrayOf(left, top, left + side, top + side)
     }
 
+    /** Pixel bounds for 3:1 aspect ratio scan box quality checks. */
+    fun centerWide3x1Roi(width: Int, height: Int): IntArray {
+        val cropH = min(height, width / 3).coerceAtLeast(1)
+        val cropW = (cropH * 3).coerceAtMost(width)
+        val left = (width - cropW) / 2
+        val top = (height - cropH) / 2
+        return intArrayOf(left, top, left + cropW, top + cropH)
+    }
+
     private fun cropFraction(
         bitmap: Bitmap,
         leftFrac: Float,
