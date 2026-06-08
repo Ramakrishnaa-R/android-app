@@ -68,13 +68,16 @@ class ImageProcessingActivity : AppCompatActivity() {
     private suspend fun runPipeline(original: Bitmap) {
         val container = findViewById<LinearLayout>(R.id.stepsContainer)
 
-        // 1. 1:3 Crop (scan zone)
-        showStep(container, "📷 1:3 Crop (scan zone)", original.copy(Bitmap.Config.ARGB_8888, false))
+        // 1. Image Passed to Gemma
+        showStep(container, "📷 Image Passed to Gemma 3n", original.copy(Bitmap.Config.ARGB_8888, false))
         delay(200)
 
-        // 2. OCR Text from Filter
-        val filterText = BitmapHolder.filterOcrTexts?.get("bp-sat") ?: ""
-        showTextStep(container, "📝 OCR Text from Filter", filterText.ifBlank { "(no text)" })
+        // Extract Gemma OCR results
+        val squareOcr = intent.getStringExtra(EXTRA_PRIMARY_OCR)?.trim().orEmpty()
+        val wideOcr = intent.getStringExtra(EXTRA_WIDE_OCR)?.trim().orEmpty()
+
+        // 2. Gemma 3n Output
+        showTextStep(container, "🤖 Gemma 3n Output Text", squareOcr.ifBlank { "(no text detected)" })
         delay(200)
 
         // Hide loader
@@ -83,30 +86,14 @@ class ImageProcessingActivity : AppCompatActivity() {
         // Load medicine DB
         withContext(Dispatchers.IO) { MedicineRepository.loadIfNeeded(this@ImageProcessingActivity) }
 
-        // Collect OCR results
-        var squareOcr = intent.getStringExtra(EXTRA_PRIMARY_OCR)?.trim()
-            ?: MainActivity.pendingOcrResult?.trim().orEmpty()
-        var wideOcr = intent.getStringExtra(EXTRA_WIDE_OCR)?.trim()
-            ?: MainActivity.pendingWideOcrText?.trim().orEmpty()
-
-        var waits = 0
-        while (squareOcr.length < 3 && wideOcr.length < 3 && waits < 15) {
-            delay(200)
-            squareOcr = MainActivity.pendingOcrResult?.trim().orEmpty()
-            wideOcr   = MainActivity.pendingWideOcrText?.trim().orEmpty()
-            waits++
-        }
-        if (squareOcr.length < 3) squareOcr = filterText
-        if (wideOcr.length   < 3) wideOcr   = BitmapHolder.filterOcrTexts?.get("bp-sat").orEmpty()
-
         resultPrimaryOcr = squareOcr
         resultWideOcr    = wideOcr
 
         showTextPipeline(container, squareOcr, wideOcr)
         showMatchResults(container, squareOcr, wideOcr)
 
-        val hasText = squareOcr.length >= 3 || wideOcr.length >= 3
-        showMessage(if (hasText) "✅ Debug view — tap Close" else "Waiting for OCR… tap Close anyway")
+        val hasText = squareOcr.length >= 3
+        showMessage(if (hasText) "✅ Debug view — tap Close" else "Gemma returned no text — tap Close")
         findViewById<Button>(R.id.btnClose).visibility = View.VISIBLE
     }
 

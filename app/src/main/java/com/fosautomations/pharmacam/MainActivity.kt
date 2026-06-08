@@ -393,27 +393,42 @@ class MainActivity : AppCompatActivity() {
                         matchingScope.launch {
                             try {
                                 withContext(Dispatchers.Main) {
-                                    binding.statusText.text = "Reading with AI…"
+                                    binding.statusText.text = "Analyzing image with Gemma 3n on-device AI…"
                                     binding.statusText.setTextColor("#FF9800".toColorInt())
                                 }
 
                                 val medicineName = visionFinder?.extractMedicineName(projectionCrop)
 
-                                if (!medicineName.isNullOrBlank()) {
-                                    withContext(Dispatchers.Main) {
-                                        finishCapture()
-                                        processScanResult(
-                                            primaryOcr = medicineName,
-                                            hintOcr = null
-                                        )
-                                    }
-                                } else {
-                                    Log.w("Gemma", "Gemma inference returned empty, falling back to ML Kit OCR")
-                                    runFallbackOcrPipeline(projectionCrop)
+                                withContext(Dispatchers.Main) {
+                                    finishCapture()
+                                    startActivityForResult(
+                                        Intent(
+                                            this@MainActivity,
+                                            ImageProcessingActivity::class.java
+                                        ).apply {
+                                            putExtra(
+                                                ImageProcessingActivity.EXTRA_PRIMARY_OCR,
+                                                medicineName.orEmpty()
+                                            )
+                                            putExtra(
+                                                ImageProcessingActivity.EXTRA_WIDE_OCR,
+                                                ""
+                                            )
+                                            putStringArrayListExtra(
+                                                ImageProcessingActivity.EXTRA_BLACKLIST,
+                                                ArrayList(blacklist)
+                                            )
+                                        },
+                                        REQUEST_IMAGE_PROCESSING
+                                    )
                                 }
                             } catch (e: Exception) {
-                                Log.e("Gemma", "Gemma inference failed, falling back to ML Kit OCR", e)
-                                runFallbackOcrPipeline(projectionCrop)
+                                Log.e("Gemma", "Gemma inference failed", e)
+                                withContext(Dispatchers.Main) {
+                                    finishCapture()
+                                    binding.statusText.text = "Not found — try again"
+                                    binding.statusText.setTextColor("#F44336".toColorInt())
+                                }
                             }
                         }
 
@@ -436,70 +451,6 @@ class MainActivity : AppCompatActivity() {
             }
         )
     }
-
-    private suspend fun runFallbackOcrPipeline(projectionCrop: Bitmap) {
-        try {
-            withContext(Dispatchers.Main) {
-                binding.statusText.text = "Running OCR pipeline…"
-                binding.statusText.setTextColor("#FF9800".toColorInt())
-            }
-            val consensus = processMultiFilterCrops(projectionCrop)
-
-            val ocrResult = consensus.ocrResult
-
-            pendingWideOcrText = ocrResult.fullText.ifBlank { ocrResult.matchText }
-            val primaryText = ocrResult.fullText.ifBlank { ocrResult.matchText }
-            if (primaryText.length >= 3) {
-                pendingOcrResult = primaryText
-            }
-            val wideText = pendingWideOcrText.orEmpty()
-
-            withContext(Dispatchers.Main) {
-                finishCapture()
-                startActivityForResult(
-                    Intent(
-                        this@MainActivity,
-                        ImageProcessingActivity::class.java
-                    ).apply {
-                        putExtra(
-                            ImageProcessingActivity.EXTRA_PRIMARY_OCR,
-                            primaryText
-                        )
-                        putExtra(
-                            ImageProcessingActivity.EXTRA_WIDE_OCR,
-                            wideText
-                        )
-                        putStringArrayListExtra(
-                            ImageProcessingActivity.EXTRA_BLACKLIST,
-                            ArrayList(blacklist)
-                        )
-                    },
-                    REQUEST_IMAGE_PROCESSING
-                )
-            }
-        } catch (e: CancellationException) {
-            Log.w(TAG, "SHUTTER: OCR pipeline timed out or cancelled")
-            withContext(Dispatchers.Main) {
-                finishCapture()
-                Toast.makeText(
-                    this@MainActivity,
-                    "Scan took too long — tap again",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "SHUTTER: OCR pipeline failed", e)
-            withContext(Dispatchers.Main) {
-                finishCapture()
-                Toast.makeText(
-                    this@MainActivity,
-                    "OCR failed — tap again",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-    }
-
     private fun finishCapture() {
         isCapturing = false
         binding.btnShutter.isEnabled = true
