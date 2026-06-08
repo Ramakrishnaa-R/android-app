@@ -99,6 +99,7 @@ class MainActivity : AppCompatActivity() {
     private var isFlashOn = false
 
     private var pillDetector: PillDetector? = null
+    private var visionFinder: VisionMedicineFinder? = null
     private lateinit var confirmedAdapter: ConfirmedMedicineAdapter
     private var speechRecognizer: android.speech.SpeechRecognizer? = null
     private var isListening = false
@@ -392,65 +393,27 @@ class MainActivity : AppCompatActivity() {
                         matchingScope.launch {
                             try {
                                 withContext(Dispatchers.Main) {
-                                    binding.statusText.text = "Cropping scan box…"
+                                    binding.statusText.text = "Reading with AI…"
                                     binding.statusText.setTextColor("#FF9800".toColorInt())
                                 }
-                                val consensus = processMultiFilterCrops(projectionCrop)
 
-                                val ocrResult = consensus.ocrResult
+                                val medicineName = visionFinder?.extractMedicineName(projectionCrop)
 
-                                pendingWideOcrText = ocrResult.fullText.ifBlank { ocrResult.matchText }
-                                val primaryText = ocrResult.fullText.ifBlank { ocrResult.matchText }
-                                if (primaryText.length >= 3) {
-                                    pendingOcrResult = primaryText
-                                }
-                                val wideText = pendingWideOcrText.orEmpty()
-
-                                withContext(Dispatchers.Main) {
-                                    finishCapture()
-                                    startActivityForResult(
-                                        Intent(
-                                            this@MainActivity,
-                                            ImageProcessingActivity::class.java
-                                        ).apply {
-                                            putExtra(
-                                                ImageProcessingActivity.EXTRA_PRIMARY_OCR,
-                                                primaryText
-                                            )
-                                            putExtra(
-                                                ImageProcessingActivity.EXTRA_WIDE_OCR,
-                                                wideText
-                                            )
-                                            putStringArrayListExtra(
-                                                ImageProcessingActivity.EXTRA_BLACKLIST,
-                                                ArrayList(blacklist)
-                                            )
-                                        },
-                                        REQUEST_IMAGE_PROCESSING
-                                    )
-                                }
-                            } catch (e: CancellationException) {
-                                // TimeoutCancellationException is a CancellationException;
-                                // catch it here so finishCapture() is guaranteed to run.
-                                Log.w(TAG, "SHUTTER: OCR pipeline timed out or cancelled")
-                                withContext(Dispatchers.Main) {
-                                    finishCapture()
-                                    Toast.makeText(
-                                        this@MainActivity,
-                                        "Scan took too long — tap again",
-                                        Toast.LENGTH_LONG
-                                    ).show()
+                                if (!medicineName.isNullOrBlank()) {
+                                    withContext(Dispatchers.Main) {
+                                        finishCapture()
+                                        processScanResult(
+                                            primaryOcr = medicineName,
+                                            hintOcr = null
+                                        )
+                                    }
+                                } else {
+                                    Log.w("Gemma", "Gemma inference returned empty, falling back to ML Kit OCR")
+                                    runFallbackOcrPipeline(projectionCrop)
                                 }
                             } catch (e: Exception) {
-                                Log.e(TAG, "SHUTTER: OCR pipeline failed", e)
-                                withContext(Dispatchers.Main) {
-                                    finishCapture()
-                                    Toast.makeText(
-                                        this@MainActivity,
-                                        "OCR failed — tap again",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
+                                Log.e("Gemma", "Gemma inference failed, falling back to ML Kit OCR", e)
+                                runFallbackOcrPipeline(projectionCrop)
                             }
                         }
 
@@ -472,6 +435,69 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+    }
+
+    private suspend fun runFallbackOcrPipeline(projectionCrop: Bitmap) {
+        try {
+            withContext(Dispatchers.Main) {
+                binding.statusText.text = "Running OCR pipeline…"
+                binding.statusText.setTextColor("#FF9800".toColorInt())
+            }
+            val consensus = processMultiFilterCrops(projectionCrop)
+
+            val ocrResult = consensus.ocrResult
+
+            pendingWideOcrText = ocrResult.fullText.ifBlank { ocrResult.matchText }
+            val primaryText = ocrResult.fullText.ifBlank { ocrResult.matchText }
+            if (primaryText.length >= 3) {
+                pendingOcrResult = primaryText
+            }
+            val wideText = pendingWideOcrText.orEmpty()
+
+            withContext(Dispatchers.Main) {
+                finishCapture()
+                startActivityForResult(
+                    Intent(
+                        this@MainActivity,
+                        ImageProcessingActivity::class.java
+                    ).apply {
+                        putExtra(
+                            ImageProcessingActivity.EXTRA_PRIMARY_OCR,
+                            primaryText
+                        )
+                        putExtra(
+                            ImageProcessingActivity.EXTRA_WIDE_OCR,
+                            wideText
+                        )
+                        putStringArrayListExtra(
+                            ImageProcessingActivity.EXTRA_BLACKLIST,
+                            ArrayList(blacklist)
+                        )
+                    },
+                    REQUEST_IMAGE_PROCESSING
+                )
+            }
+        } catch (e: CancellationException) {
+            Log.w(TAG, "SHUTTER: OCR pipeline timed out or cancelled")
+            withContext(Dispatchers.Main) {
+                finishCapture()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Scan took too long — tap again",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "SHUTTER: OCR pipeline failed", e)
+            withContext(Dispatchers.Main) {
+                finishCapture()
+                Toast.makeText(
+                    this@MainActivity,
+                    "OCR failed — tap again",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     private fun finishCapture() {
@@ -766,6 +792,11 @@ class MainActivity : AppCompatActivity() {
 
         matchingScope.launch(Dispatchers.IO) {
             pillDetector = PillDetector(this@MainActivity)
+            try {
+                visionFinder = VisionMedicineFinder(this@MainActivity)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize VisionMedicineFinder", e)
+            }
         }
         matchingScope.launch {
             MedicineRepository.loadIfNeeded(this@MainActivity)
@@ -1540,6 +1571,7 @@ class MainActivity : AppCompatActivity() {
         matchingScope.cancel()
         recognizer.close()
         pillDetector?.close()
+        visionFinder?.close()
         beep?.release()
         speechRecognizer?.destroy()
         _binding = null
