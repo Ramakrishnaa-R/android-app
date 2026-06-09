@@ -20,12 +20,13 @@ class VisionMedicineFinder(private val context: Context) : AutoCloseable {
         try {
             val options = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
-                .setMaxTokens(1024)     // Need enough space for multimodal input (image + text prompt) + output tokens
-                .setMaxNumImages(1)     // we only send 1 image at a time
+                .setMaxTokens(512)     // Reduced from 1024 to save memory & processing overhead
+                .setMaxNumImages(1)     // Only 1 image is sent at a time
+                .setPreferredBackend(LlmInference.Backend.GPU) // Enable GPU acceleration for 5x-10x speedup
                 .build()
             
             llmInference = LlmInference.createFromOptions(context, options)
-            Log.d("VisionMedicineFinder", "Model loaded successfully")
+            Log.d("VisionMedicineFinder", "Model loaded successfully with GPU backend")
         } catch (e: Exception) {
             Log.e("VisionMedicineFinder", "Failed to load model: ${e.message}", e)
         }
@@ -58,21 +59,7 @@ class VisionMedicineFinder(private val context: Context) : AutoCloseable {
                 scanSession.use { s ->
                     s.addImage(mpImage)
                     
-                    val prompt = """
-                        Look at this medicine package image.
-                        Extract ONLY the brand name and strength/quantity.
-                        Examples of correct answers:
-                        - DOLO 650
-                        - NITROBACT 100
-                        - T BACT OINTMENT
-                        - RAZO 20
-                        - AUGMENTIN 625
-                        
-                        If you cannot clearly read or identify any medicine brand and strength from the package, reply with ONLY the text "NOT FOUND".
-                        
-                        Reply with ONLY the medicine name and strength.
-                        Nothing else. No explanation.
-                    """.trimIndent()
+                    val prompt = "Extract ONLY the medicine brand name and strength (e.g. DOLO 650, NITROBACT 100). Reply with ONLY the name and strength, nothing else. If unreadable, reply ONLY 'NOT FOUND'."
                     
                     s.addQueryChunk(prompt)
                     val result = s.generateResponse().trim()

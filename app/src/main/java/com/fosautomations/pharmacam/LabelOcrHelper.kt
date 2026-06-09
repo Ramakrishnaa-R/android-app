@@ -81,6 +81,13 @@ object LabelOcrHelper {
 
     private val BRAND_LIKE = Regex("""^[A-Z][A-Z0-9\-]{4,14}$""")
 
+    private val COFGELS_REPLACEMENT = Regex("""\bCOFGEL[S]?\b""", RegexOption.IGNORE_CASE)
+    private val ALKOF_REPLACEMENT = Regex("""\bALK0F\b""", RegexOption.IGNORE_CASE)
+    private val DOLO650_REPLACEMENT = Regex("""\bD[O0][L1][EO0][\s\-]?650\b""", RegexOption.IGNORE_CASE)
+    private val OLO650_REPLACEMENT = Regex("""\bOLO[\s\-]?650\b""", RegexOption.IGNORE_CASE)
+    private val SPACES = Regex("\\s+")
+    private val DOLO_WORD = Regex("""\bDOLO\b""", RegexOption.IGNORE_CASE)
+
     data class OcrResult(
         val matchText: String,
         val fullText: String,
@@ -337,14 +344,11 @@ object LabelOcrHelper {
         for ((bad, good) in CHAR_FIXES) {
             s = s.replace(bad, good)
         }
-        s = s.replace(Regex("""\bCOFGEL[S]?\b""", RegexOption.IGNORE_CASE), "COFGELS")
-        s = s.replace(Regex("""\bALK0F\b""", RegexOption.IGNORE_CASE), "ALKOF")
-        s = s.replace(
-            Regex("""\bD[O0][L1][EO0][\s\-]?650\b""", RegexOption.IGNORE_CASE),
-            "DOLO-650"
-        )
-        s = s.replace(Regex("""\bOLO[\s\-]?650\b""", RegexOption.IGNORE_CASE), "DOLO-650")
-        return s.replace(Regex("\\s+"), " ").trim()
+        s = s.replace(COFGELS_REPLACEMENT, "COFGELS")
+        s = s.replace(ALKOF_REPLACEMENT, "ALKOF")
+        s = s.replace(DOLO650_REPLACEMENT, "DOLO-650")
+        s = s.replace(OLO650_REPLACEMENT, "DOLO-650")
+        return s.replace(SPACES, " ").trim()
     }
 
     /** Prefer Dolo-650-style lines over Paracetamol Tablets lines. */
@@ -356,7 +360,7 @@ object LabelOcrHelper {
             val u = line.uppercase(Locale.ROOT)
             BRAND_STRENGTH_LINE.containsMatchIn(line) ||
                 DOLO_BRAND_LINE.containsMatchIn(line) ||
-                Regex("""\bDOLO\b""", RegexOption.IGNORE_CASE).containsMatchIn(line) ||
+                DOLO_WORD.containsMatchIn(line) ||
                 (u.contains("650") && u.length <= 14 && u.contains("OLO")) ||
                 (u.contains("ALKOF") && u.contains("COFGEL"))
         }
@@ -381,7 +385,7 @@ object LabelOcrHelper {
         var bonus = 0
         if (BRAND_STRENGTH_LINE.containsMatchIn(line)) bonus += 120
         if (DOLO_BRAND_LINE.containsMatchIn(line)) bonus += 150
-        if (Regex("""\bDOLO\b""", RegexOption.IGNORE_CASE).containsMatchIn(line)) bonus += 80
+        if (DOLO_WORD.containsMatchIn(line)) bonus += 80
         if (isIngredientOnlyLine(line.uppercase(Locale.ROOT))) bonus -= 200
         return bonus
     }
@@ -404,11 +408,11 @@ object LabelOcrHelper {
         else if (upperRatio < 0.4f) score -= 15
 
         if (BRAND_STRENGTH_LINE.containsMatchIn(upper)) score += 90
-        if (Regex("""\bDOLO\b""", RegexOption.IGNORE_CASE).containsMatchIn(upper)) score += 50
+        if (DOLO_WORD.containsMatchIn(upper)) score += 50
         if (STRENGTH_PATTERN.containsMatchIn(upper)) score += 20
         if (FORM_WORD.containsMatchIn(upper)) score += 5
 
-        val words = upper.split(Regex("\\s+")).filter { it.length >= 4 }
+        val words = upper.split(SPACES).filter { it.length >= 4 }
         val drugLike = words.count { w ->
             w.length >= 5 && w.any { it.isLetter() } && w.count { it.isDigit() } <= 2
         }

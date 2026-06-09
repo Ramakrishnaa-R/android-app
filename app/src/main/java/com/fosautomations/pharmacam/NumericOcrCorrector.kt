@@ -8,6 +8,13 @@ object NumericOcrCorrector {
 
     private const val TAG = "NumericOcrCorrector"
 
+    private val BRAND_COLON_STRENGTH = Regex("""([A-Z])(:)(\d)""")
+    private val BOUNDARY_LETTER_DIGIT = Regex("""([A-Z])(\d)""")
+    private val BOUNDARY_DIGIT_LETTER = Regex("""(\d)([A-Z])""")
+    private val SPACES = Regex("""\s+""")
+    private val MULTIPLE_SPACES = Regex("""\s{2,}""")
+    private val CANDIDATE_NUMBER = Regex("""\d+(\.\d+)?""")
+
     fun cleanOcrText(raw: String): String {
         var text = raw.uppercase(Locale.ROOT)
 
@@ -22,14 +29,14 @@ object NumericOcrCorrector {
 
         // Remove colons that OCR inserts between brand and strength (Raxo:20 → RAXO 20)
         // Do this BEFORE splitting so we don't corrupt digit sequences
-        text = text.replace(Regex("""([A-Z])(:)(\d)"""), "$1 $3")
+        text = text.replace(BRAND_COLON_STRENGTH, "$1 $3")
 
         // Split letter-digit and digit-letter boundaries to get clean tokens
-        text = text.replace(Regex("""([A-Z])(\d)"""), "$1 $2")
-        text = text.replace(Regex("""(\d)([A-Z])"""), "$1 $2")
+        text = text.replace(BOUNDARY_LETTER_DIGIT, "$1 $2")
+        text = text.replace(BOUNDARY_DIGIT_LETTER, "$1 $2")
 
         // Apply word-level brand corrections on individual tokens
-        val correctedTokens = text.split(Regex("""\s+""")).map { token ->
+        val correctedTokens = text.split(SPACES).map { token ->
             when (token.trim()) {
                 "RAXO", "RAX", "RAX0", "ROZO", "RAZOO", "REZO", "REBO", "RABOZ", "RABOA" -> "RAZO"
                 "RABELPRAZOLE", "RABEPRAZOL", "RABEPRAZLE" -> "RABEPRAZOLE"
@@ -37,7 +44,7 @@ object NumericOcrCorrector {
             }
         }
 
-        return correctedTokens.joinToString(" ").replace(Regex("""\s{2,}"""), " ").trim()
+        return correctedTokens.joinToString(" ").replace(MULTIPLE_SPACES, " ").trim()
     }
 
     /** Hardcoded valid medicine strengths whitelist (all common doses). */
@@ -85,7 +92,7 @@ object NumericOcrCorrector {
             }
         }
         
-        val corrected = result.replace(Regex("""\s{2,}"""), " ").trim()
+        val corrected = result.replace(MULTIPLE_SPACES, " ").trim()
         
         if (corrected != text) {
             Log.d(TAG, "Final corrected OCR: $corrected")
@@ -115,7 +122,7 @@ object NumericOcrCorrector {
             }
         }
         
-        if (!candidate.matches(Regex("""\d+(\.\d+)?"""))) return token
+        if (!candidate.matches(CANDIDATE_NUMBER)) return token
 
         val corrected = normalizeNumber(candidate)
         

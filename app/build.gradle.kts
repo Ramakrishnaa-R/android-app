@@ -102,6 +102,7 @@ android {
 dependencies {
     implementation(libs.mediapipe.tasks.vision)
     implementation(libs.mediapipe.tasks.genai)
+    implementation(libs.mediapipe.tasks.text)
 
     implementation(libs.androidx.core.ktx)
 

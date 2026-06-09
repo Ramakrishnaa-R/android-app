@@ -66,6 +66,20 @@ object MedicineNameResolver {
         RegexOption.IGNORE_CASE
     )
 
+    private val CLEAN_SPACED_CHARS = Regex("[^A-Z0-9 \\-]")
+    private val SPACES = Regex("\\s+")
+    private val CLEAN_COMPACT_CHARS = Regex("[^A-Z0-9]")
+    private val NON_ALPHANUMERIC = Regex("[^A-Z0-9]+")
+    private val BRAND_STRENGTH_PAIRS = Regex(
+        """\b([A-Z]{3,20})[\s\-]*((?:[2-9]00|1000|650|625|500|457|400|375|325|300|250|228|200|150|125|100|80|75|60|50|40|30|25|20|15|10|8|5|4|2))\b"""
+    )
+    private val AUGMENTIN_STRENGTH = Regex("""A?UG?MENTIN(\d{2,4})""")
+    private val AUGMENTIN_FUSED_625 = Regex("""A?UG?MENTIN[S5Z2]2[5S]""")
+    private val FUSED_ALKOF = Regex("""ALKOF(COFGEL[S]?)""")
+    private val FUSED_ALKAZAR = Regex("""ALKAZAR(LIQUID)?""")
+    private val FUSED_CATAFAST = Regex("""CATAFAST""")
+    private val FUSED_DOLO = Regex("""DOLO(650)?""", RegexOption.IGNORE_CASE)
+
     data class Resolved(
         val searchQuery: String,
         val medicine: Medicine?,
@@ -77,19 +91,18 @@ object MedicineNameResolver {
     fun combineOcrSources(vararg parts: String): String =
         parts.map { it.trim() }.filter { it.length >= 2 }.joinToString(" ")
 
-    /** Build a short query for [Matcher] — not the full OCR blob. */
     fun buildSearchQuery(ocrText: String): String {
         val cleaned = NumericOcrCorrector.cleanOcrText(ocrText)
         val correctedOcr = NumericOcrCorrector.correct(cleaned)
         val upper = correctedOcr.uppercase(Locale.ROOT)
-        val spaced = upper.replace(Regex("[^A-Z0-9 \\-]"), " ").replace(Regex("\\s+"), " ").trim()
+        val spaced = upper.replace(CLEAN_SPACED_CHARS, " ").replace(SPACES, " ").trim()
         if (upper.contains("ALKALIZER") || upper.contains("ALKAFLOW")) return "ALKALIZER"
 
         DOLO_IN_TEXT.find(correctedOcr)?.let { return "DOLO 650" }
 
         normalizeKnownStrengthOcr(upper)?.let { return it }
 
-        val compact = upper.replace(Regex("[^A-Z0-9]"), "")
+        val compact = upper.replace(CLEAN_COMPACT_CHARS, "")
 
         detectAlkalizerBrand(compact)?.let { return it }
 
@@ -249,18 +262,18 @@ object MedicineNameResolver {
         if (primary.isNotBlank()) list.add(primary)
 
         val spacedForPairs = correctedOcr.uppercase(Locale.ROOT)
-            .replace(Regex("[^A-Z0-9 \\-]"), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(CLEAN_SPACED_CHARS, " ")
+            .replace(SPACES, " ")
             .trim()
         extractAllBrandStrengthPairs(spacedForPairs).forEach { list.add(it) }
 
         val words = correctedOcr.uppercase(Locale.ROOT)
-            .split(Regex("[^A-Z0-9]+"))
+            .split(NON_ALPHANUMERIC)
             .filter { it.isNotEmpty() }
         val hasDoloWord = words.any { it == "DOLO" || it == "DOLE" || it == "DELO" || it == "OLO" || it == "POLO" }
         val has650Word = words.any { it == "650" }
 
-        val compact = correctedOcr.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
+        val compact = correctedOcr.uppercase(Locale.ROOT).replace(CLEAN_COMPACT_CHARS, "")
         if (has650Word && (DOLO_OCR.containsMatchIn(compact) || hasDoloWord)) {
             list.add("DOLO 650")
             list.add("DOLO 650MG TAB")
@@ -285,8 +298,8 @@ object MedicineNameResolver {
 
         // Add all individual brand-like tokens as queries
         val spaced = correctedOcr.uppercase(Locale.ROOT)
-            .replace(Regex("[^A-Z0-9 \\-]"), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(CLEAN_SPACED_CHARS, " ")
+            .replace(SPACES, " ")
             .trim()
         val tokens = spaced.split(" ")
             .map { it.trim() }
@@ -323,7 +336,7 @@ object MedicineNameResolver {
             return "DOLO 650"
         }
         val words = raw.uppercase(Locale.ROOT)
-            .split(Regex("[^A-Z0-9]+"))
+            .split(NON_ALPHANUMERIC)
             .filter { it.isNotEmpty() }
         val hasDoloWord = words.any { it == "DOLO" || it == "DOLE" || it == "DELO" || it == "OLO" || it == "POLO" }
         val has650Word = words.any { it == "650" }
@@ -338,10 +351,7 @@ object MedicineNameResolver {
     }
 
     fun extractAllBrandStrengthPairs(spaced: String): List<String> {
-        val brandStrengthRegex = Regex(
-            """\b([A-Z]{3,20})[\s\-]*((?:[2-9]00|1000|650|625|500|457|400|375|325|300|250|228|200|150|125|100|80|75|60|50|40|30|25|20|15|10|8|5|4|2))\b"""
-        )
-        return brandStrengthRegex.findAll(spaced)
+        return BRAND_STRENGTH_PAIRS.findAll(spaced)
             .map { match ->
                 val brand    = match.groupValues[1]
                 val strength = match.groupValues[2]
@@ -354,24 +364,20 @@ object MedicineNameResolver {
     }
 
     private fun splitKnownFused(compact: String): String? {
-        Regex("""A?UG?MENTIN(\d{2,4})""").find(compact)?.let { m ->
+        AUGMENTIN_STRENGTH.find(compact)?.let { m ->
             val strength = if (m.groupValues[1] == "525") "625" else m.groupValues[1]
             return "AUGMENTIN $strength"
         }
-        Regex("""A?UG?MENTIN[S5Z2]2[5S]""").find(compact)?.let {
+        AUGMENTIN_FUSED_625.find(compact)?.let {
             return "AUGMENTIN 625"
         }
         if (compact.contains("AUGMENTIN") || compact.contains("AGMENTIN")) return "AUGMENTIN"
 
-        val patterns = listOf(
-            Regex("""ALKOF(COFGEL[S]?)""") to "ALKOF COFGELS",
-            Regex("""ALKAZAR(LIQUID)?""") to "ALKAZAR",
-            Regex("""CATAFAST""") to "CATAFAST",
-            Regex("""DOLO(650)?""", RegexOption.IGNORE_CASE) to "DOLO 650"
-        )
-        for ((pattern, name) in patterns) {
-            if (pattern.containsMatchIn(compact)) return name
-        }
+        if (FUSED_ALKOF.containsMatchIn(compact)) return "ALKOF COFGELS"
+        if (FUSED_ALKAZAR.containsMatchIn(compact)) return "ALKAZAR"
+        if (FUSED_CATAFAST.containsMatchIn(compact)) return "CATAFAST"
+        if (FUSED_DOLO.containsMatchIn(compact)) return "DOLO 650"
+
         return null
     }
 

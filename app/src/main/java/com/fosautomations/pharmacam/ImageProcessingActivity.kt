@@ -34,6 +34,8 @@ class ImageProcessingActivity : AppCompatActivity() {
         const val EXTRA_BLACKLIST   = "extra_blacklist"
         const val EXTRA_PRIMARY_OCR = "extra_primary_ocr"
         const val EXTRA_WIDE_OCR    = "extra_wide_ocr"
+        const val EXTRA_RESOLVED_NAME = "extra_resolved_name"
+        const val EXTRA_RESOLVED_ID   = "extra_resolved_id"
     }
 
     private val scope = kotlinx.coroutines.CoroutineScope(
@@ -47,6 +49,8 @@ class ImageProcessingActivity : AppCompatActivity() {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private var resultPrimaryOcr = ""
     private var resultWideOcr    = ""
+    private var resolvedMedicineName = ""
+    private var resolvedMedicineId = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,6 +76,13 @@ class ImageProcessingActivity : AppCompatActivity() {
         showStep(container, "📷 Image Passed to Gemma 3n", original.copy(Bitmap.Config.ARGB_8888, false))
         delay(200)
 
+        // Show the contrast-filtered image if available
+        val filteredBmp = BitmapHolder.filteredBitmap
+        if (filteredBmp != null) {
+            showStep(container, "✨ Contrast Filtered (BP70 + Sat75%)", filteredBmp.copy(Bitmap.Config.ARGB_8888, false))
+            delay(200)
+        }
+
         // Extract Gemma OCR results
         val squareOcr = intent.getStringExtra(EXTRA_PRIMARY_OCR)?.trim().orEmpty()
         val wideOcr = intent.getStringExtra(EXTRA_WIDE_OCR)?.trim().orEmpty()
@@ -91,6 +102,17 @@ class ImageProcessingActivity : AppCompatActivity() {
 
         showTextPipeline(container, squareOcr, wideOcr)
         showMatchResults(container, squareOcr, wideOcr)
+
+        // Store the resolved medicine details to return them in the activity result
+        val primary          = squareOcr.ifBlank { wideOcr }
+        val correctedPrimary = NumericOcrCorrector.correct(primary)
+        val correctedWide    = NumericOcrCorrector.correct(wideOcr)
+        val blacklist        = intent.getStringArrayListExtra(EXTRA_BLACKLIST)?.toSet() ?: emptySet()
+        val resolved         = MedicineNameResolver.resolveForScan(correctedPrimary, correctedWide, blacklist, 5)
+        resolved.medicine?.let {
+            resolvedMedicineName = it.name
+            resolvedMedicineId = it.id
+        }
 
         val hasText = squareOcr.length >= 3
         showMessage(if (hasText) "✅ Debug view — tap Close" else "Gemma returned no text — tap Close")
@@ -157,7 +179,13 @@ class ImageProcessingActivity : AppCompatActivity() {
                 val topMatch = resolved.alternatives.firstOrNull()
                 if (topMatch != null) {
                     val isHashMap = topMatch.explanation == "EXACT_HASHMAP_MATCH"
-                    append("Match Method: ${if (isHashMap) "⚡ HashMap Exact Match" else "🔍 Fuzzy Match"}\n")
+                    val isSemantic = topMatch.explanation.contains("SEMANTIC_SIM")
+                    val method = when {
+                        isHashMap -> "⚡ HashMap Exact Match"
+                        isSemantic -> "🧠 Semantic RAG (Vector) Match"
+                        else -> "🔍 Fuzzy Match"
+                    }
+                    append("Match Method: $method\n")
                 }
                 append("Score: ${resolved.score.toInt()}%\n")
                 append("Query Used: ${resolved.searchQuery}\n")
@@ -180,7 +208,13 @@ class ImageProcessingActivity : AppCompatActivity() {
                 append("\n\nOther Candidates Checked:")
                 alternates.forEachIndexed { i, m ->
                     val isHashMap = m.explanation == "EXACT_HASHMAP_MATCH"
-                    append("\n  ${i + 2}. ${m.medicine.name} (${m.score.toInt()}%) - ${if (isHashMap) "HashMap Exact" else "Fuzzy"}")
+                    val isSemantic = m.explanation.contains("SEMANTIC_SIM")
+                    val method = when {
+                        isHashMap -> "HashMap Exact"
+                        isSemantic -> "Semantic"
+                        else -> "Fuzzy"
+                    }
+                    append("\n  ${i + 2}. ${m.medicine.name} (${m.score.toInt()}%) - $method")
                     if (m.explanation.isNotBlank() && !isHashMap) {
                         append("\n     Breakdown: ${m.explanation}")
                     }
@@ -267,6 +301,10 @@ class ImageProcessingActivity : AppCompatActivity() {
                         intent.getStringExtra(EXTRA_WIDE_OCR)
                             ?: MainActivity.pendingWideOcrText.orEmpty()
                     })
+                if (resolvedMedicineName.isNotBlank()) {
+                    putExtra(EXTRA_RESOLVED_NAME, resolvedMedicineName)
+                    putExtra(EXTRA_RESOLVED_ID, resolvedMedicineId)
+                }
             }
         )
         finish()

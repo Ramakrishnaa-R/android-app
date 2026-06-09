@@ -412,7 +412,16 @@ class MainActivity : AppCompatActivity() {
                                     }
                                 }
 
-                                val medicineName = visionFinder?.extractMedicineName(projectionCrop)
+                                val medicineNameDeferred = async(Dispatchers.Default) {
+                                    visionFinder?.extractMedicineName(projectionCrop)
+                                }
+                                val mlKitResultDeferred = async(Dispatchers.Default) {
+                                    processMultiFilterCrops(projectionCrop)
+                                }
+
+                                val medicineName = medicineNameDeferred.await()
+                                val mlKitResult = mlKitResultDeferred.await()
+                                val mlKitText = mlKitResult.ocrResult.fullText.ifBlank { mlKitResult.ocrResult.matchText }
                                 statusJob?.cancel()
 
                                 withContext(Dispatchers.Main) {
@@ -428,7 +437,7 @@ class MainActivity : AppCompatActivity() {
                                             )
                                             putExtra(
                                                 ImageProcessingActivity.EXTRA_WIDE_OCR,
-                                                ""
+                                                mlKitText
                                             )
                                             putStringArrayListExtra(
                                                 ImageProcessingActivity.EXTRA_BLACKLIST,
@@ -762,12 +771,25 @@ class MainActivity : AppCompatActivity() {
             pillDetector = PillDetector(this@MainActivity)
             try {
                 visionFinder = VisionMedicineFinder(this@MainActivity)
+                Matcher.initEmbeddingHelper(this@MainActivity)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize VisionMedicineFinder", e)
+                Log.e(TAG, "Failed to initialize VisionMedicineFinder/EmbeddingHelper", e)
             }
         }
         matchingScope.launch {
             MedicineRepository.loadIfNeeded(this@MainActivity)
+        }
+        matchingScope.launch {
+            delay(1000)
+            while (MedicineRepository.dbIndexingProgress >= 0) {
+                binding.statusText.text = "Initializing Semantic Search DB: ${MedicineRepository.dbIndexingProgress}%"
+                binding.statusText.setTextColor("#FF9800".toColorInt())
+                delay(1000)
+            }
+            if (binding.statusText.text.contains("Initializing")) {
+                binding.statusText.text = "Nothing readable — move closer & tap camera"
+                binding.statusText.setTextColor("#FF9800".toColorInt())
+            }
         }
     }
 
@@ -1760,6 +1782,16 @@ class MainActivity : AppCompatActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_IMAGE_PROCESSING) return
+
+        val resolvedName = data?.getStringExtra(ImageProcessingActivity.EXTRA_RESOLVED_NAME)
+        val resolvedId = data?.getStringExtra(ImageProcessingActivity.EXTRA_RESOLVED_ID)
+        if (!resolvedName.isNullOrBlank()) {
+            val med = Medicine(resolvedName, resolvedId.orEmpty())
+            runOnUiThread {
+                onMedicineDetected(med)
+            }
+            return
+        }
 
         val squareOcr = data?.getStringExtra(ImageProcessingActivity.EXTRA_PRIMARY_OCR)
             ?: pendingOcrResult

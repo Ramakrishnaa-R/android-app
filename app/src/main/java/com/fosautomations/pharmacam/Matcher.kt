@@ -1,5 +1,6 @@
 package com.fosautomations.pharmacam
 
+import android.content.Context
 import android.util.Log
 import java.util.*
 import kotlin.math.*
@@ -230,6 +231,7 @@ val CHAR_FIXES = mapOf(
 private data class PrecomputedMedicine(
     val medicine: Medicine,
     val medNameRaw: String,
+    val medNameNormalized: String,
     val brandKey: String,
     val medTokens: List<String>,
     val medChars: String,
@@ -277,6 +279,26 @@ class TemporalVoteBuffer(private val windowSize: Int = 5, private val minVotes: 
 
 object Matcher {
 
+    private val NON_ALPHANUMERIC = Regex("[^A-Z0-9]")
+    private val SPACES = Regex("\\s+")
+    private val BOUNDARY_LETTER_DIGIT = Regex("""([A-Z])(\d)""")
+    private val BOUNDARY_DIGIT_LETTER = Regex("""(\d)([A-Z])""")
+    private val SPACED_SLASHES = Regex("[\\s/]+")
+    private val BRAND_KEY_DELIMITERS = Regex("[\\s\\-/]+")
+    private val NON_LETTERS = Regex("[^A-Z]")
+    private val DIGITS = Regex("\\d+")
+    private val NON_ALPHANUMERIC_SPACED = Regex("[^A-Z0-9 \\-]")
+    private val NON_ALPHANUMERIC_SPLIT = Regex("[^A-Z0-9]+")
+    private val SPACED_HYPHENS = Regex("[\\s\\-]")
+
+    private var textEmbeddingHelper: TextEmbeddingHelper? = null
+
+    fun initEmbeddingHelper(context: Context) {
+        if (textEmbeddingHelper == null) {
+            textEmbeddingHelper = TextEmbeddingHelper(context.applicationContext)
+        }
+    }
+
     data class ScoredMatch(
         val medicine: Medicine,
         val score: Double,
@@ -299,12 +321,14 @@ object Matcher {
         val db = MedicineRepository.getDatabase()
         precomputedDb = db.map { med ->
             val raw    = med.name.uppercase(Locale.ROOT)
-            val chars  = raw.replace(Regex("[^A-Z0-9]"), "")
+            val chars  = raw.replace(NON_ALPHANUMERIC, "")
             val key    = extractBrandKey(raw)
             val tokens = tokenize(raw)
+            val normalized = MedicineRepository.dbNormalize(med.name)
             PrecomputedMedicine(
                 medicine           = med,
                 medNameRaw         = raw,
+                medNameNormalized  = normalized,
                 brandKey           = key,
                 medTokens          = tokens,
                 medChars           = chars,
@@ -312,7 +336,7 @@ object Matcher {
                 medBigrams         = bigrams(chars),
                 aliasGenerics      = ALIASES[key] ?: emptyList(),
                 medDosageSuffixes  = extractDosageSuffixes(raw),   // FIX 5: precomputed
-                medCategoryTokens  = raw.split(Regex("\\s+"))
+                medCategoryTokens  = raw.split(SPACES)
                     .filter { it in CATEGORY_TOKENS }.toSet(),
             )
         }
@@ -411,19 +435,41 @@ object Matcher {
 
         data class BigramCandidate(val precomp: PrecomputedMedicine, val bigramScore: Double)
 
-        val candidates = database
-            .asSequence()
-            .filter { it.medicine.name !in blacklist }
-            .map { precomp ->
-                val aliasForced = precomp.brandKey in inputAliasKeys
-                val bScore = if (aliasForced) 100.0
-                else bigramJaccard(inputBigrams, precomp.medBigrams)
-                BigramCandidate(precomp, bScore)
-            }
-            .filter { it.bigramScore >= 3.0 }
-            .sortedByDescending { it.bigramScore }
-            .take(candidateLimit)
-            .toList()
+        val helper = textEmbeddingHelper
+        val queryVector = if (helper != null) helper.getEmbedding(exactQuery) else null
+        val useVectorSearch = queryVector != null && MedicineRepository.isEmbeddingsReady()
+
+        val candidates = if (useVectorSearch) {
+            database
+                .asSequence()
+                .filter { it.medicine.name !in blacklist }
+                .map { precomp ->
+                    val aliasForced = precomp.brandKey in inputAliasKeys
+                    val vector = MedicineRepository.getEmbeddingDirect(precomp.medNameNormalized)
+                    val simScore = if (aliasForced) 1.0f
+                                   else if (vector != null) TextEmbeddingHelper.cosineSimilarity(queryVector, vector)
+                                   else 0.0f
+                    BigramCandidate(precomp, simScore.toDouble() * 100.0)
+                }
+                .filter { it.bigramScore >= 45.0 }
+                .sortedByDescending { it.bigramScore }
+                .take(candidateLimit)
+                .toList()
+        } else {
+            database
+                .asSequence()
+                .filter { it.medicine.name !in blacklist }
+                .map { precomp ->
+                    val aliasForced = precomp.brandKey in inputAliasKeys
+                    val bScore = if (aliasForced) 100.0
+                    else bigramJaccard(inputBigrams, precomp.medBigrams)
+                    BigramCandidate(precomp, bScore)
+                }
+                .filter { it.bigramScore >= 3.0 }
+                .sortedByDescending { it.bigramScore }
+                .take(candidateLimit)
+                .toList()
+        }
 
         Log.d("MATCHER", "Phase 1: ${candidates.size} candidates")
 
@@ -436,6 +482,7 @@ object Matcher {
                     inputChars          = inputChars,
                     inputNumbers        = inputNumbers,
                     inputDosageSuffixes = inputDosageSuffixes,
+                    queryVector         = queryVector,
                 )
             }
             .filter { it.score >= 55.0 }
@@ -502,6 +549,7 @@ object Matcher {
         inputChars: String,
         inputNumbers: Set<String>,
         inputDosageSuffixes: Set<String>,
+        queryVector: FloatArray? = null,
     ): ScoredMatch {
 
         val reasons = mutableListOf<String>()
@@ -623,16 +671,23 @@ object Matcher {
             if (token.length >= 4 &&
                 (precomp.medNameRaw.startsWith(token) ||
                  precomp.medNameRaw.replace("-", "").startsWith(token) ||
-                 precomp.medNameRaw.replace(Regex("[\\s\\-]"), "").startsWith(token))) {
+                 precomp.medNameRaw.replace(SPACED_HYPHENS, "").startsWith(token))) {
                 score += 15.0
                 reasons.add("BRAND_PREFIX($token)")
                 break
             }
         }
 
-        // 6. Bigram similarity — FIX 6: weight reduced from 0.6 → 0.5
-        val inputBigrams = bigrams(inputChars)
-        score += bigramJaccard(inputBigrams, precomp.medBigrams) * 0.5
+        // 6. Semantic Similarity or Bigram similarity
+        val vector = MedicineRepository.getEmbeddingDirect(precomp.medNameNormalized)
+        if (queryVector != null && vector != null) {
+            val sim = TextEmbeddingHelper.cosineSimilarity(queryVector, vector)
+            score += sim * 50.0
+            reasons.add("SEMANTIC_SIM(${(sim*100).toInt()}%)")
+        } else {
+            val inputBigrams = bigrams(inputChars)
+            score += bigramJaccard(inputBigrams, precomp.medBigrams) * 0.5
+        }
 
         // 7. Subsequence score — FIX 6: weight reduced from 0.15 → 0.12
         score += subsequenceScore(inputChars, medChars) * 0.12
@@ -682,7 +737,7 @@ object Matcher {
     // =======================================================================
 
     internal fun extractBrandKey(medNameRaw: String): String {
-        val parts = medNameRaw.split(Regex("[\\s\\-/]+")).filter { it.isNotEmpty() }
+        val parts = medNameRaw.split(BRAND_KEY_DELIMITERS).filter { it.isNotEmpty() }
         if (parts.isNotEmpty()) {
             val first = parts[0].uppercase(Locale.ROOT)
             if (first.length < 3 && parts.size > 1) {
@@ -701,7 +756,7 @@ object Matcher {
                 }
             }
         }
-        return medNameRaw.replace(Regex("[^A-Z]"), "").take(8)
+        return medNameRaw.replace(NON_LETTERS, "").take(8)
     }
 
     private fun lengthBoost(token: String): Double = when {
@@ -718,11 +773,11 @@ object Matcher {
 
         // Step 2: Split letter-digit and digit-letter boundaries
         val text = cleaned.uppercase(Locale.ROOT)
-            .replace(Regex("""([A-Z])(\d)"""), "$1 $2")
-            .replace(Regex("""(\d)([A-Z])"""), "$1 $2")
+            .replace(BOUNDARY_LETTER_DIGIT, "$1 $2")
+            .replace(BOUNDARY_DIGIT_LETTER, "$1 $2")
 
         // Step 3: Split on spaces, handle hyphens with fusion, apply fixes
-        val spaceSplit = text.split(Regex("\\s+"))
+        val spaceSplit = text.split(SPACES)
 
         // For each space-token, split on hyphens and also yield the no-hyphen concat
         val splitHyphens = spaceSplit.flatMap { token ->
@@ -740,7 +795,7 @@ object Matcher {
 
         val tokens = fused
             .map { token ->
-                val clean = token.replace(Regex("[^A-Z0-9]"), "")
+                val clean = token.replace(NON_ALPHANUMERIC, "")
                 val charFixed = if (clean.all { it.isDigit() } || clean.isEmpty()) {
                     clean
                 } else {
@@ -759,7 +814,7 @@ object Matcher {
     }
 
     private fun extractNumbers(text: String): Set<String> =
-        Regex("\\d+").findAll(text).map { it.value }.toSet()
+        DIGITS.findAll(text).map { it.value }.toSet()
 
     private fun isLikelyOcrNumberMatch(input: String, medicine: String): Boolean {
         if (input.length != medicine.length || input.length !in 2..4) return false
@@ -771,8 +826,8 @@ object Matcher {
 
         // Split on spaces/slashes first (keep hyphens temporarily)
         val spaceSplit = rawUpper
-            .replace(Regex("[^A-Z0-9 \\-]"), "")
-            .split(Regex("[\\s/]+"))
+            .replace(NON_ALPHANUMERIC_SPACED, "")
+            .split(SPACED_SLASHES)
             .filter { it.isNotEmpty() }
 
         // For hyphenated tokens: keep parts AND no-hyphen concat
@@ -813,7 +868,7 @@ object Matcher {
         )
         return text
             .uppercase()
-            .split(Regex("[^A-Z0-9]+"))
+            .split(NON_ALPHANUMERIC_SPLIT)
             .filter { it in suffixes }
             .toSet()
     }

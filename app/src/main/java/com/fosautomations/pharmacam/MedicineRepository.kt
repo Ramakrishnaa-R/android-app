@@ -3,6 +3,7 @@ package com.fosautomations.pharmacam
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -12,22 +13,31 @@ import java.util.*
 object MedicineRepository {
     private val database = mutableListOf<Medicine>()
     private val nameToMedicineMap = HashMap<String, Medicine>()
+    private val nameToVectorMap = java.util.concurrent.ConcurrentHashMap<String, FloatArray>()
     private val invertedIndex = mutableMapOf<String, MutableSet<Medicine>>()
     private val categoryIndex = mutableMapOf<ProductCategory, MutableList<Medicine>>()
     private var isLoaded = false
+    var dbIndexingProgress = -1
+        private set
 
     private val NOISE = setOf(
         "IP", "W", "WV", "WITH", "AND", "FOR", "USE", "ONLY", "EXP", "MFG", "BATCH", "NO",
         "DATE", "MRP", "EXTERNAL", "TREATMENT", "INFECTION", "THE"
     )
 
+    private val BOUNDARY_LETTER_DIGIT = Regex("""([A-Z])(\d)""")
+    private val BOUNDARY_DIGIT_LETTER = Regex("""(\d)([A-Z])""")
+    private val NON_ALPHANUMERIC_SPACED = Regex("[^A-Z0-9 \\-]")
+    private val SPACES = Regex("\\s+")
+    private val NON_ALPHANUMERIC = Regex("[^A-Z0-9]")
+
     fun dbNormalize(text: String): String {
         val upper = text.uppercase(Locale.ROOT)
         return upper
-            .replace(Regex("""([A-Z])(\d)"""), "$1 $2")
-            .replace(Regex("""(\d)([A-Z])"""), "$1 $2")
-            .replace(Regex("[^A-Z0-9 \\-]"), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(BOUNDARY_LETTER_DIGIT, "$1 $2")
+            .replace(BOUNDARY_DIGIT_LETTER, "$1 $2")
+            .replace(NON_ALPHANUMERIC_SPACED, " ")
+            .replace(SPACES, " ")
             .trim()
     }
 
@@ -37,7 +47,15 @@ object MedicineRepository {
         nameToMedicineMap[dbNormalize(name)]
     }
 
+    fun getEmbedding(name: String): FloatArray? = getEmbeddingDirect(dbNormalize(name))
+
+    fun getEmbeddingDirect(normalizedName: String): FloatArray? = nameToVectorMap[normalizedName]
+
     fun isReady(): Boolean = synchronized(database) { isLoaded && database.isNotEmpty() }
+
+    fun isEmbeddingsReady(): Boolean {
+        return isLoaded && dbIndexingProgress < 0 && nameToVectorMap.isNotEmpty()
+    }
 
     fun getIndex(): Map<String, Set<Medicine>> = synchronized(invertedIndex) { invertedIndex.toMap() }
 
@@ -56,7 +74,7 @@ object MedicineRepository {
         seen.toList()
     }
 
-    suspend fun loadIfNeeded(context: Context) {
+suspend fun loadIfNeeded(context: Context) {
         if (isLoaded) return
         withContext(Dispatchers.IO) {
             try {
@@ -69,11 +87,81 @@ object MedicineRepository {
                 
                 val jsonArray = JSONArray(jsonString)
                 parseJsonArray(jsonArray)
+
                 isLoaded = true
                 Log.d("PharmaCam", "Database loaded: ${database.size} items")
+
+                // Load or precompute semantic search embeddings asynchronously in the background
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    loadEmbeddingsIfNeeded(context)
+                }
             } catch (e: Exception) {
                 Log.e("PharmaCam", "Error loading database", e)
             }
+        }
+    }
+
+    private fun loadEmbeddingsIfNeeded(context: Context) {
+        val binFile = File(context.filesDir, "medicines_embeddings.bin")
+        if (binFile.exists()) {
+            try {
+                binFile.inputStream().use { fis ->
+                    val dis = java.io.DataInputStream(fis)
+                    val size = dis.readInt()
+                    val dim = dis.readInt()
+                    for (i in 0 until size) {
+                        val name = dis.readUTF()
+                        val embeddingSize = dis.readInt()
+                        val array = FloatArray(embeddingSize)
+                        for (j in 0 until embeddingSize) {
+                            array[j] = dis.readFloat()
+                        }
+                        nameToVectorMap[dbNormalize(name)] = array
+                    }
+                }
+                Log.d("PharmaCam", "Embeddings loaded from binary cache: ${nameToVectorMap.size} items")
+                return
+            } catch (e: Exception) {
+                Log.e("PharmaCam", "Failed to read binary embeddings cache, recomputing...", e)
+                nameToVectorMap.clear()
+            }
+        }
+
+        Log.d("PharmaCam", "Precomputing embeddings for database...")
+        dbIndexingProgress = 0
+        try {
+            TextEmbeddingHelper(context).use { helper ->
+                database.forEachIndexed { index, med ->
+                    val norm = dbNormalize(med.name)
+                    val vector = helper.getEmbedding(norm)
+                    if (vector != null) {
+                        nameToVectorMap[norm] = vector
+                    }
+                    if (index % 150 == 0 || index == database.lastIndex) {
+                        dbIndexingProgress = (index * 100 / database.size).coerceIn(0, 100)
+                    }
+                }
+
+                // Write binary cache
+                binFile.outputStream().use { fos ->
+                    val dos = java.io.DataOutputStream(fos)
+                    dos.writeInt(nameToVectorMap.size)
+                    val sampleVector = nameToVectorMap.values.firstOrNull()
+                    val dim = sampleVector?.size ?: 256
+                    dos.writeInt(dim)
+                    nameToVectorMap.forEach { (name, vector) ->
+                        dos.writeUTF(name)
+                        dos.writeInt(vector.size)
+                        vector.forEach { f -> dos.writeFloat(f) }
+                    }
+                    dos.flush()
+                }
+                Log.d("PharmaCam", "Embeddings precomputed and cached: ${nameToVectorMap.size} items")
+            }
+        } catch (e: Exception) {
+            Log.e("PharmaCam", "Error precomputing embeddings: ${e.message}", e)
+        } finally {
+            dbIndexingProgress = -1
         }
     }
 
@@ -147,8 +235,8 @@ object MedicineRepository {
 
     fun tokenize(text: String): List<String> {
         val rawUpper = text.uppercase(Locale.ROOT)
-        val spaceSplit = rawUpper.replace("[^A-Z0-9 \\-]".toRegex(), "")
-            .split("\\s+".toRegex())
+        val spaceSplit = rawUpper.replace(NON_ALPHANUMERIC_SPACED, "")
+            .split(SPACES)
             .filter { it.isNotEmpty() }
         
         val splitHyphens = spaceSplit.flatMap { token ->
@@ -162,7 +250,7 @@ object MedicineRepository {
         }
         
         val fused = fuseShortTokens(splitHyphens)
-        return fused.map { it.replace("[^A-Z0-9]".toRegex(), "") }.filter { it.isNotEmpty() }
+        return fused.map { it.replace(NON_ALPHANUMERIC, "") }.filter { it.isNotEmpty() }
     }
 
     suspend fun addMedicine(context: Context, medicine: Medicine) {
@@ -171,6 +259,7 @@ object MedicineRepository {
                 addInternalLocked(medicine)
             }
             save(context)
+            loadEmbeddingsIfNeeded(context)
         }
     }
 
@@ -184,6 +273,7 @@ object MedicineRepository {
                 }
             }
             save(context)
+            loadEmbeddingsIfNeeded(context)
         }
     }
 
@@ -197,6 +287,7 @@ object MedicineRepository {
                 }
             }
             save(context)
+            loadEmbeddingsIfNeeded(context)
         }
     }
 
@@ -204,6 +295,7 @@ object MedicineRepository {
         invertedIndex.clear()
         categoryIndex.clear()
         nameToMedicineMap.clear()
+        nameToVectorMap.clear()
         database.forEach { med ->
             nameToMedicineMap[dbNormalize(med.name)] = med
             val category = ProductCategoryClassifier.classify(med.name, ClassificationSource.DATABASE)

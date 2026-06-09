@@ -29,17 +29,19 @@ enum class ProductCategory(val displayName: String) {
     OTHER("Other");
 
     companion object {
+        private val CLEAN_ALPHANUMERIC = Regex("[^A-Z0-9]+")
+
         fun fromLabel(label: String?): ProductCategory? {
             val normalized = label
                 ?.uppercase(Locale.ROOT)
-                ?.replace("[^A-Z0-9]+".toRegex(), " ")
+                ?.replace(CLEAN_ALPHANUMERIC, " ")
                 ?.trim()
                 .orEmpty()
             if (normalized.isBlank()) return null
 
             return entries.firstOrNull { category ->
                 normalized == category.name ||
-                    normalized == category.displayName.uppercase(Locale.ROOT).replace("[^A-Z0-9]+".toRegex(), " ").trim()
+                    normalized == category.displayName.uppercase(Locale.ROOT).replace(CLEAN_ALPHANUMERIC, " ").trim()
             } ?: when (normalized) {
                 "TABLET", "TABLETS", "CAPSULE", "CAPSULES", "CAP", "BOLUS" -> PILL
                 "TONIC", "SYRUP", "LIQUID", "LIQUID SYRUP" -> TONIC
@@ -154,11 +156,13 @@ object ProductCategoryClassifier {
 
     private val STRENGTH_UNITS = setOf("MG", "MCG", "GM", "G")
     private val STRIP_COUNT_PATTERN = Regex("""\b\d{1,3}\s*'?S\b""")
+    private val NORMALIZE_CLEAN = Regex("[^A-Z0-9/]+")
+    private val SPACES = Regex("\\s+")
 
     private fun normalize(text: String): String =
         text.uppercase(Locale.ROOT)
-            .replace("[^A-Z0-9/]+".toRegex(), " ")
-            .replace("\\s+".toRegex(), " ")
+            .replace(NORMALIZE_CLEAN, " ")
+            .replace(SPACES, " ")
             .trim()
 
     private fun hasAny(tokens: Set<String>, candidates: Set<String>): Boolean =
